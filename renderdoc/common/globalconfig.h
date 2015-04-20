@@ -59,7 +59,7 @@ enum
 // Logging configuration
 
 // error logs trigger a breakpoint
-#define DEBUGBREAK_ON_ERROR_LOG
+//#define DEBUGBREAK_ON_ERROR_LOG
 
 // whether to include timestamp on log lines
 #define INCLUDE_TIMESTAMP_IN_LOG
