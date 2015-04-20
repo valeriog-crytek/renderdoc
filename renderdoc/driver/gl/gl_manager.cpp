@@ -266,6 +266,8 @@ bool GLResourceManager::Prepare_InitialState(GLResource res)
 	
 	const GLHookSet &gl = m_GL->m_Real;
 
+	gl.glFlush();
+
 	if(res.Namespace == eResBuffer)
 	{
 		GLResourceRecord *record = GetResourceRecord(res);
