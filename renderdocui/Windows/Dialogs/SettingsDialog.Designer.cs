@@ -32,6 +32,7 @@
             System.Windows.Forms.TableLayoutPanel tableLayoutPanel1;
             System.Windows.Forms.GroupBox groupBox1;
             System.Windows.Forms.TableLayoutPanel tableLayoutPanel2;
+            System.ComponentModel.ComponentResourceManager resources = new System.ComponentModel.ComponentResourceManager(typeof(SettingsDialog));
             System.Windows.Forms.Label label13;
             System.Windows.Forms.Label label6;
             System.Windows.Forms.Label label4;
@@ -41,18 +42,15 @@
             System.Windows.Forms.Label label7;
             System.Windows.Forms.Label label3;
             System.Windows.Forms.Label label11;
+            System.Windows.Forms.Label label15;
             System.Windows.Forms.GroupBox groupBox2;
             System.Windows.Forms.Label label10;
-            System.Windows.Forms.Label label14;
             System.Windows.Forms.GroupBox groupBox3;
             System.Windows.Forms.Label label12;
             System.Windows.Forms.GroupBox groupBox4;
             System.Windows.Forms.Label label8;
             System.Windows.Forms.Label label9;
-            TreelistView.TreeListColumn treeListColumn1 = ((TreelistView.TreeListColumn)(new TreelistView.TreeListColumn("Section", "Section")));
-            this.ok = new System.Windows.Forms.Button();
-            this.toolTip = new System.Windows.Forms.ToolTip(this.components);
-            this.browserCaptureDialog = new System.Windows.Forms.FolderBrowserDialog();
+            TreelistView.TreeListColumn treeListColumn1 = new TreelistView.TreeListColumn("Section", "Section");
             this.settingsTabs = new renderdocui.Controls.TablessControl();
             this.generalTab = new System.Windows.Forms.TabPage();
             this.AllowGlobalHook = new System.Windows.Forms.CheckBox();
@@ -64,10 +62,12 @@
             this.Formatter_MinFigures = new System.Windows.Forms.NumericUpDown();
             this.CheckUpdate_AllowChecks = new System.Windows.Forms.CheckBox();
             this.browseCaptureDirectory = new System.Windows.Forms.Button();
+            this.Font_PreferMonospaced = new System.Windows.Forms.CheckBox();
             this.texViewTab = new System.Windows.Forms.TabPage();
             this.tableLayoutPanel3 = new System.Windows.Forms.TableLayoutPanel();
             this.TextureViewer_ResetRange = new System.Windows.Forms.CheckBox();
             this.TextureViewer_PerTexSettings = new System.Windows.Forms.CheckBox();
+            this.label14 = new System.Windows.Forms.Label();
             this.shadViewTab = new System.Windows.Forms.TabPage();
             this.tableLayoutPanel4 = new System.Windows.Forms.TableLayoutPanel();
             this.ShaderViewer_FriendlyNaming = new System.Windows.Forms.CheckBox();
@@ -76,6 +76,9 @@
             this.EventBrowser_TimeUnit = new System.Windows.Forms.ComboBox();
             this.EventBrowser_HideEmpty = new System.Windows.Forms.CheckBox();
             this.pagesTree = new TreelistView.TreeListView();
+            this.ok = new System.Windows.Forms.Button();
+            this.toolTip = new System.Windows.Forms.ToolTip(this.components);
+            this.browserCaptureDialog = new System.Windows.Forms.FolderBrowserDialog();
             tableLayoutPanel1 = new System.Windows.Forms.TableLayoutPanel();
             groupBox1 = new System.Windows.Forms.GroupBox();
             tableLayoutPanel2 = new System.Windows.Forms.TableLayoutPanel();
@@ -88,9 +91,9 @@
             label7 = new System.Windows.Forms.Label();
             label3 = new System.Windows.Forms.Label();
             label11 = new System.Windows.Forms.Label();
+            label15 = new System.Windows.Forms.Label();
             groupBox2 = new System.Windows.Forms.GroupBox();
             label10 = new System.Windows.Forms.Label();
-            label14 = new System.Windows.Forms.Label();
             groupBox3 = new System.Windows.Forms.GroupBox();
             label12 = new System.Windows.Forms.Label();
             groupBox4 = new System.Windows.Forms.GroupBox();
@@ -133,21 +136,6 @@
             tableLayoutPanel1.RowStyles.Add(new System.Windows.Forms.RowStyle());
             tableLayoutPanel1.Size = new System.Drawing.Size(580, 353);
             tableLayoutPanel1.TabIndex = 1;
-            // 
-            // ok
-            // 
-            this.ok.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Right)));
-            this.ok.Location = new System.Drawing.Point(502, 327);
-            this.ok.Name = "ok";
-            this.ok.Size = new System.Drawing.Size(75, 23);
-            this.ok.TabIndex = 100;
-            this.ok.Text = "OK";
-            this.ok.UseVisualStyleBackColor = true;
-            this.ok.Click += new System.EventHandler(this.ok_Click);
-            // 
-            // browserCaptureDialog
-            // 
-            this.browserCaptureDialog.RootFolder = System.Environment.SpecialFolder.MyComputer;
             // 
             // settingsTabs
             // 
@@ -209,10 +197,12 @@
             tableLayoutPanel2.Controls.Add(this.CheckUpdate_AllowChecks, 1, 8);
             tableLayoutPanel2.Controls.Add(label11, 0, 6);
             tableLayoutPanel2.Controls.Add(this.browseCaptureDirectory, 1, 6);
+            tableLayoutPanel2.Controls.Add(label15, 0, 9);
+            tableLayoutPanel2.Controls.Add(this.Font_PreferMonospaced, 1, 9);
             tableLayoutPanel2.Dock = System.Windows.Forms.DockStyle.Fill;
             tableLayoutPanel2.Location = new System.Drawing.Point(3, 16);
             tableLayoutPanel2.Name = "tableLayoutPanel2";
-            tableLayoutPanel2.RowCount = 10;
+            tableLayoutPanel2.RowCount = 11;
             tableLayoutPanel2.RowStyles.Add(new System.Windows.Forms.RowStyle());
             tableLayoutPanel2.RowStyles.Add(new System.Windows.Forms.RowStyle());
             tableLayoutPanel2.RowStyles.Add(new System.Windows.Forms.RowStyle());
@@ -222,6 +212,7 @@
             tableLayoutPanel2.RowStyles.Add(new System.Windows.Forms.RowStyle());
             tableLayoutPanel2.RowStyles.Add(new System.Windows.Forms.RowStyle());
             tableLayoutPanel2.RowStyles.Add(new System.Windows.Forms.RowStyle());
+            tableLayoutPanel2.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Absolute, 20F));
             tableLayoutPanel2.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 100F));
             tableLayoutPanel2.Size = new System.Drawing.Size(361, 285);
             tableLayoutPanel2.TabIndex = 0;
@@ -235,8 +226,7 @@
             this.AllowGlobalHook.Name = "AllowGlobalHook";
             this.AllowGlobalHook.Size = new System.Drawing.Size(15, 14);
             this.AllowGlobalHook.TabIndex = 16;
-            this.toolTip.SetToolTip(this.AllowGlobalHook, "Allow RenderDoc to insert a global hook into all processes to catch the execution" +
-        " of the desired process, without directly launching it.");
+            this.toolTip.SetToolTip(this.AllowGlobalHook, resources.GetString("AllowGlobalHook.ToolTip"));
             this.AllowGlobalHook.UseVisualStyleBackColor = true;
             this.AllowGlobalHook.CheckedChanged += new System.EventHandler(this.AllowGlobalHook_CheckedChanged);
             // 
@@ -252,8 +242,7 @@
             label13.TabIndex = 15;
             label13.Text = "Allow global process hooking - be careful!";
             label13.TextAlign = System.Drawing.ContentAlignment.MiddleLeft;
-            this.toolTip.SetToolTip(label13, "Allows RenderDoc to phone home to http://renderdoc.org to anonymously check for n" +
-        "ew versions.");
+            this.toolTip.SetToolTip(label13, resources.GetString("label13.ToolTip"));
             // 
             // Formatter_PosExp
             // 
@@ -479,7 +468,8 @@
             this.CheckUpdate_AllowChecks.Name = "CheckUpdate_AllowChecks";
             this.CheckUpdate_AllowChecks.Size = new System.Drawing.Size(15, 14);
             this.CheckUpdate_AllowChecks.TabIndex = 8;
-            this.toolTip.SetToolTip(this.CheckUpdate_AllowChecks, "Allow periodic update checks");
+            this.toolTip.SetToolTip(this.CheckUpdate_AllowChecks, "Allows RenderDoc to phone home to http://renderdoc.org to anonymously check for n" +
+        "ew versions.");
             this.CheckUpdate_AllowChecks.UseVisualStyleBackColor = true;
             this.CheckUpdate_AllowChecks.CheckedChanged += new System.EventHandler(this.CheckUpdate_AllowChecks_CheckedChanged);
             // 
@@ -511,6 +501,33 @@
             this.browseCaptureDirectory.UseVisualStyleBackColor = true;
             this.browseCaptureDirectory.Click += new System.EventHandler(this.browseCaptureDirectory_Click);
             // 
+            // label15
+            // 
+            label15.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) 
+            | System.Windows.Forms.AnchorStyles.Left) 
+            | System.Windows.Forms.AnchorStyles.Right)));
+            label15.AutoSize = true;
+            label15.Location = new System.Drawing.Point(3, 231);
+            label15.Name = "label15";
+            label15.Size = new System.Drawing.Size(259, 20);
+            label15.TabIndex = 17;
+            label15.Text = "Prefer monospaced fonts in UI (restart required)";
+            label15.TextAlign = System.Drawing.ContentAlignment.MiddleLeft;
+            this.toolTip.SetToolTip(label15, "Wherever possible a monospaced font will be used instead of the default font");
+            // 
+            // Font_PreferMonospaced
+            // 
+            this.Font_PreferMonospaced.AutoSize = true;
+            this.Font_PreferMonospaced.Checked = true;
+            this.Font_PreferMonospaced.CheckState = System.Windows.Forms.CheckState.Checked;
+            this.Font_PreferMonospaced.Location = new System.Drawing.Point(268, 234);
+            this.Font_PreferMonospaced.Name = "Font_PreferMonospaced";
+            this.Font_PreferMonospaced.Size = new System.Drawing.Size(15, 14);
+            this.Font_PreferMonospaced.TabIndex = 18;
+            this.toolTip.SetToolTip(this.Font_PreferMonospaced, "Wherever possible a monospaced font will be used instead of the default font");
+            this.Font_PreferMonospaced.UseVisualStyleBackColor = true;
+            this.Font_PreferMonospaced.CheckedChanged += new System.EventHandler(this.Font_PreferMonospaced_CheckedChanged);
+            // 
             // texViewTab
             // 
             this.texViewTab.Controls.Add(groupBox2);
@@ -541,7 +558,7 @@
             this.tableLayoutPanel3.Controls.Add(this.TextureViewer_ResetRange, 1, 0);
             this.tableLayoutPanel3.Controls.Add(this.TextureViewer_PerTexSettings, 1, 1);
             this.tableLayoutPanel3.Controls.Add(label10, 0, 0);
-            this.tableLayoutPanel3.Controls.Add(label14, 0, 1);
+            this.tableLayoutPanel3.Controls.Add(this.label14, 0, 1);
             this.tableLayoutPanel3.Dock = System.Windows.Forms.DockStyle.Fill;
             this.tableLayoutPanel3.Location = new System.Drawing.Point(3, 16);
             this.tableLayoutPanel3.Name = "tableLayoutPanel3";
@@ -568,11 +585,12 @@
             // 
             this.TextureViewer_PerTexSettings.AutoSize = true;
             this.TextureViewer_PerTexSettings.Dock = System.Windows.Forms.DockStyle.Fill;
-            this.TextureViewer_PerTexSettings.Location = new System.Drawing.Point(291, 3);
+            this.TextureViewer_PerTexSettings.Location = new System.Drawing.Point(291, 23);
             this.TextureViewer_PerTexSettings.Name = "TextureViewer_PerTexSettings";
             this.TextureViewer_PerTexSettings.Size = new System.Drawing.Size(67, 14);
             this.TextureViewer_PerTexSettings.TabIndex = 20;
-            this.toolTip.SetToolTip(this.TextureViewer_PerTexSettings, "The visible channels (RGBA) and selected mip/slice are remembered and restored per-texture.");
+            this.toolTip.SetToolTip(this.TextureViewer_PerTexSettings, "The visible channels (RGBA) and selected mip/slice are remembered and restored pe" +
+        "r-texture.");
             this.TextureViewer_PerTexSettings.UseVisualStyleBackColor = true;
             this.TextureViewer_PerTexSettings.CheckedChanged += new System.EventHandler(this.TextureViewer_PerTexSettings_CheckedChanged);
             // 
@@ -592,17 +610,17 @@
             // 
             // label14
             // 
-            label14.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom)
-            | System.Windows.Forms.AnchorStyles.Left)
+            this.label14.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) 
+            | System.Windows.Forms.AnchorStyles.Left) 
             | System.Windows.Forms.AnchorStyles.Right)));
-            label14.AutoSize = true;
-            label14.Location = new System.Drawing.Point(3, 3);
-            label14.Margin = new System.Windows.Forms.Padding(3);
-            label14.Name = "label14";
-            label14.Size = new System.Drawing.Size(282, 14);
-            label14.TabIndex = 4;
-            label14.Text = "Visible channels && mip/slice saved per-texture";
-            label14.TextAlign = System.Drawing.ContentAlignment.MiddleLeft;
+            this.label14.AutoSize = true;
+            this.label14.Location = new System.Drawing.Point(3, 23);
+            this.label14.Margin = new System.Windows.Forms.Padding(3);
+            this.label14.Name = "label14";
+            this.label14.Size = new System.Drawing.Size(282, 14);
+            this.label14.TabIndex = 4;
+            this.label14.Text = "Visible channels && mip/slice saved per-texture";
+            this.label14.TextAlign = System.Drawing.ContentAlignment.MiddleLeft;
             // 
             // shadViewTab
             // 
@@ -782,6 +800,21 @@
             this.pagesTree.ViewOptions.ShowPlusMinus = false;
             this.pagesTree.AfterSelect += new System.Windows.Forms.TreeViewEventHandler(this.pagesTree_AfterSelect);
             // 
+            // ok
+            // 
+            this.ok.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Right)));
+            this.ok.Location = new System.Drawing.Point(502, 327);
+            this.ok.Name = "ok";
+            this.ok.Size = new System.Drawing.Size(75, 23);
+            this.ok.TabIndex = 100;
+            this.ok.Text = "OK";
+            this.ok.UseVisualStyleBackColor = true;
+            this.ok.Click += new System.EventHandler(this.ok_Click);
+            // 
+            // browserCaptureDialog
+            // 
+            this.browserCaptureDialog.RootFolder = System.Environment.SpecialFolder.MyComputer;
+            // 
             // SettingsDialog
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(6F, 13F);
@@ -847,5 +880,7 @@
         private System.Windows.Forms.Button browseCaptureDirectory;
         private System.Windows.Forms.FolderBrowserDialog browserCaptureDialog;
         private System.Windows.Forms.CheckBox AllowGlobalHook;
+        private System.Windows.Forms.CheckBox Font_PreferMonospaced;
+        private System.Windows.Forms.Label label14;
     }
 }
