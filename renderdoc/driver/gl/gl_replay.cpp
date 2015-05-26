@@ -1461,7 +1461,7 @@ void GLReplay::SavePipelineState()
 	gl.glGetIntegerv(eGL_MAX_IMAGE_UNITS, &numImgUnits);
 
 	create_array_uninit(pipe.Images, RDCMIN((GLuint)numImgUnits, (GLuint)ARRAY_COUNT(pipe.Images)));
-	for(int32_t i=0; i < numImgUnits; i++)
+	for(int32_t i=0; i < RDCMIN((int32_t)numImgUnits, (int32_t)ARRAY_COUNT(pipe.Images)); i++)
 	{
 		if(rs.Images[i].name == 0)
 		{
