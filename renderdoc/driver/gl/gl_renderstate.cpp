@@ -362,8 +362,11 @@ void GLRenderState::FetchState(void *ctx, WrappedOpenGL *gl)
 	}
 
 	m_Real->glGetIntegerv(eGL_ACTIVE_TEXTURE, (GLint *)&ActiveTexture);
+
+	GLint numTexUnits = 8;
+	m_Real->glGetIntegerv(eGL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &numTexUnits);
 	
-	for(GLuint i=0; i < (GLuint)ARRAY_COUNT(Tex2D); i++)
+	for(GLuint i=0; i < (GLuint)RDCMIN((GLuint)numTexUnits, (GLuint)ARRAY_COUNT(Tex1D)); i++)
 	{
 		m_Real->glActiveTexture(GLenum(eGL_TEXTURE0 + i));
 		m_Real->glGetIntegerv(eGL_TEXTURE_BINDING_1D, (GLint*)&Tex1D[i]);
@@ -379,8 +382,11 @@ void GLRenderState::FetchState(void *ctx, WrappedOpenGL *gl)
 		m_Real->glGetIntegerv(eGL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY, (GLint*)&Tex2DMSArray[i]);
 		m_Real->glGetIntegerv(eGL_SAMPLER_BINDING, (GLint*)&Samplers[i]);
 	}
+
+	GLint numImgUnits = 8;
+	m_Real->glGetIntegerv(eGL_MAX_IMAGE_UNITS, &numImgUnits);
 	
-	for(GLuint i=0; i < (GLuint)ARRAY_COUNT(Images); i++)
+	for(GLuint i=0; i < (GLuint)RDCMIN((GLuint)numImgUnits, (GLuint)ARRAY_COUNT(Images)); i++)
 	{
 		GLboolean layered = GL_FALSE;
 
@@ -680,7 +686,10 @@ void GLRenderState::ApplyState(void *ctx, WrappedOpenGL *gl)
 		}
 	}
 
-	for(GLuint i=0; i < (GLuint)ARRAY_COUNT(Tex2D); i++)
+	GLint numTexUnits = 8;
+	m_Real->glGetIntegerv(eGL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &numTexUnits);
+
+	for(GLuint i=0; i < RDCMIN((GLuint)numTexUnits, (GLuint)ARRAY_COUNT(Tex2D)); i++)
 	{
 		m_Real->glActiveTexture(GLenum(eGL_TEXTURE0 + i));
 		m_Real->glBindTexture(eGL_TEXTURE_1D, Tex1D[i]);
@@ -696,8 +705,11 @@ void GLRenderState::ApplyState(void *ctx, WrappedOpenGL *gl)
 		m_Real->glBindTexture(eGL_TEXTURE_2D_MULTISAMPLE_ARRAY, Tex2DMSArray[i]);
 		m_Real->glBindSampler(i, Samplers[i]);
 	}
+
+	GLint numImgUnits = 8;
+	m_Real->glGetIntegerv(eGL_MAX_IMAGE_UNITS, &numImgUnits);
 	
-	for(GLuint i=0; i < (GLuint)ARRAY_COUNT(Images); i++)
+	for(GLuint i=0; i < RDCMIN((GLuint)numImgUnits, (GLuint)ARRAY_COUNT(Images)); i++)
 	{
 		// use sanitised parameters when no image is bound
 		if(Images[i].name == 0)
@@ -1011,7 +1023,7 @@ void GLRenderState::Serialise(LogState state, void *ctx, WrappedOpenGL *gl)
 
 	m_pSerialiser->Serialise<eEnabled_Count>("GL_ENABLED", Enabled);
 
-	ResourceId ids[128];
+	ResourceId ids[1024];
 
 	GLuint *texArrays[] = {
 		Tex1D,
@@ -1041,11 +1053,14 @@ void GLRenderState::Serialise(LogState state, void *ctx, WrappedOpenGL *gl)
 		"GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY",
 	};
 
+	GLint numTexUnits = 8;
+	m_Real->glGetIntegerv(eGL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &numTexUnits);
+
 	for(size_t t=0; t < ARRAY_COUNT(texArrays); t++)
 	{
 		RDCEraseEl(ids);
 		if(state >= WRITING)
-			for(size_t i=0; i < ARRAY_COUNT(Tex2D); i++)
+			for(size_t i=0; i < RDCMIN((GLuint)numTexUnits, (GLuint)ARRAY_COUNT(Tex2D)); i++)
 				if(texArrays[t][i]) ids[i] = rm->GetID(TextureRes(ctx, texArrays[t][i]));
 
 		m_pSerialiser->Serialise<ARRAY_COUNT(Tex2D)>(names[t], ids);
@@ -1055,15 +1070,18 @@ void GLRenderState::Serialise(LogState state, void *ctx, WrappedOpenGL *gl)
 				if(ids[i] != ResourceId()) texArrays[t][i] = rm->GetLiveResource(ids[i]).name;
 	}
 	
-	for(size_t i=0; i < ARRAY_COUNT(Samplers); i++)
+	for(size_t i=0; i < RDCMIN((GLuint)numTexUnits, (GLuint)ARRAY_COUNT(Samplers)); i++)
 	{
 		ResourceId ID = ResourceId();
 		if(state >= WRITING) ID = rm->GetID(SamplerRes(ctx, Samplers[i]));
 		m_pSerialiser->Serialise("GL_SAMPLER_BINDING", ID);
 		if(state < WRITING && ID != ResourceId()) Samplers[i] = rm->GetLiveResource(ID).name;
 	}
+
+	GLint numImgUnits = 8;
+	m_Real->glGetIntegerv(eGL_MAX_IMAGE_UNITS, &numImgUnits);
 	
-	for(size_t i=0; i < ARRAY_COUNT(Images); i++)
+	for(size_t i=0; i < RDCMIN((GLuint)numImgUnits, (GLuint)ARRAY_COUNT(Images)); i++)
 	{
 		ResourceId ID = ResourceId();
 		if(state >= WRITING) ID = rm->GetID(TextureRes(ctx, Images[i].name));

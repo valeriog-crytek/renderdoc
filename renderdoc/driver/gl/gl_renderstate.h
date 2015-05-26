@@ -106,18 +106,18 @@ struct GLRenderState
 
 	bool Enabled[eEnabled_Count];
 
-	uint32_t Tex1D[128];
-	uint32_t Tex2D[128];
-	uint32_t Tex3D[128];
-	uint32_t Tex1DArray[128];
-	uint32_t Tex2DArray[128];
-	uint32_t TexCubeArray[128];
-	uint32_t TexRect[128];
-	uint32_t TexBuffer[128];
-	uint32_t TexCube[128];
-	uint32_t Tex2DMS[128];
-	uint32_t Tex2DMSArray[128];
-	uint32_t Samplers[128];
+	uint32_t Tex1D[1024];
+	uint32_t Tex2D[1024];
+	uint32_t Tex3D[1024];
+	uint32_t Tex1DArray[1024];
+	uint32_t Tex2DArray[1024];
+	uint32_t TexCubeArray[1024];
+	uint32_t TexRect[1024];
+	uint32_t TexBuffer[1024];
+	uint32_t TexCube[1024];
+	uint32_t Tex2DMS[1024];
+	uint32_t Tex2DMSArray[1024];
+	uint32_t Samplers[1024];
 	GLenum ActiveTexture;
 
 	struct
@@ -128,7 +128,7 @@ struct GLRenderState
 		uint32_t layer;
 		GLenum access;
 		GLenum format;
-	} Images[8];
+	} Images[1024];
 
 	GLuint Program;
 	GLuint Pipeline;
