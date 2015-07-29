@@ -1084,11 +1084,11 @@ bool WrappedOpenGL::Serialise_glTextureParameteriEXT(GLuint texture, GLenum targ
 		{
 			GLResource res = GetResourceManager()->GetLiveResource(id);
 			GLenum curType = m_Textures[GetResourceManager()->GetLiveID(id)].curType;
-			GLuint curTex = 0;
-			m_Real.glGetIntegerv(TextureBinding(curType), (GLint*)curTex);
+			GLint curTex = 0;
+			m_Real.glGetIntegerv(TextureBinding(curType), &curTex);
 			m_Real.glBindTexture(curType, res.name);
 			m_Real.glTextureParameteriEXT(res.name, curType, PName, Param);
-			m_Real.glBindTexture(curType, curTex);
+			m_Real.glBindTexture(curType, (GLuint)curTex);
 		}
 	}
 
@@ -1173,11 +1173,11 @@ bool WrappedOpenGL::Serialise_glTextureParameterivEXT(GLuint texture, GLenum tar
 		{
 			GLResource res = GetResourceManager()->GetLiveResource(id);
 			GLenum curType = m_Textures[GetResourceManager()->GetLiveID(id)].curType;
-			GLuint curTex = 0;
-			m_Real.glGetIntegerv(TextureBinding(curType), (GLint*)curTex);
+			GLint curTex = 0;
+			m_Real.glGetIntegerv(TextureBinding(curType), &curTex);
 			m_Real.glBindTexture(curType, res.name);
 			m_Real.glTextureParameterivEXT(res.name, curType, PName, Params);
-			m_Real.glBindTexture(curType, curTex);
+			m_Real.glBindTexture(curType, (GLuint)curTex);
 		}
 	}
 
