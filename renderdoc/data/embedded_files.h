@@ -40,6 +40,7 @@ DECLARE_EMBED(arraymscopy_comp);
 DECLARE_EMBED(mesh_vert);
 DECLARE_EMBED(mesh_frag);
 DECLARE_EMBED(mesh_geom);
+DECLARE_EMBED(mesh_comp);
 DECLARE_EMBED(generic_vert);
 DECLARE_EMBED(generic_frag);
 DECLARE_EMBED(text_frag);

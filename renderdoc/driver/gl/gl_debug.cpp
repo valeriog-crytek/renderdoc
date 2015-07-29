@@ -430,6 +430,26 @@ void GLReplay::InitDebugData()
 		DebugData.Array2MS = CreateCShaderProgram(glsl.c_str());
 	}
 
+	{
+		string glsl = GetEmbeddedResource(mesh_comp);
+
+		DebugData.meshPickProgram = CreateCShaderProgram(glsl.c_str());
+	}
+
+	{
+		gl.glGenBuffers(1, &DebugData.pickResultBuf);
+		gl.glBindBuffer(eGL_SHADER_STORAGE_BUFFER, DebugData.pickResultBuf);
+		gl.glNamedBufferStorageEXT(DebugData.pickResultBuf, sizeof(Vec4f)*DebugRenderData::maxMeshPicks, NULL, GL_MAP_READ_BIT);
+
+		gl.glGenBuffers(1, &DebugData.pickResultCounterBuf);
+		gl.glBindBuffer(eGL_ATOMIC_COUNTER_BUFFER, DebugData.pickResultCounterBuf);
+		gl.glNamedBufferStorageEXT(DebugData.pickResultCounterBuf, sizeof(uint32_t), NULL, GL_DYNAMIC_STORAGE_BIT);
+
+		// sized/created on demand
+		DebugData.pickVBBuf = DebugData.pickIBBuf = 0;
+		DebugData.pickVBSize = DebugData.pickIBSize = 0;
+	}
+
 	gl.glGenVertexArrays(1, &DebugData.meshVAO);
 	gl.glBindVertexArray(DebugData.meshVAO);
 	
@@ -490,7 +510,7 @@ void GLReplay::InitDebugData()
 	gl.glGenBuffers(1, &DebugData.triHighlightBuffer);
 	gl.glBindBuffer(eGL_ARRAY_BUFFER, DebugData.triHighlightBuffer);
 	
-	gl.glNamedBufferStorageEXT(DebugData.triHighlightBuffer, sizeof(Vec4f)*16, NULL, GL_DYNAMIC_STORAGE_BIT);
+	gl.glNamedBufferStorageEXT(DebugData.triHighlightBuffer, sizeof(Vec4f)*24, NULL, GL_DYNAMIC_STORAGE_BIT);
 	
 	gl.glVertexAttribPointer(0, 4, eGL_FLOAT, GL_FALSE, sizeof(Vec4f), NULL);
 	gl.glEnableVertexAttribArray(0);
@@ -971,6 +991,201 @@ bool GLReplay::GetHistogram(ResourceId texid, uint32_t sliceFace, uint32_t mip, 
 		gl.glTextureParameterivEXT(texname, target, eGL_TEXTURE_MAX_LEVEL, (GLint *)&maxlevel);
 
 	return true;
+}
+
+uint32_t GLReplay::PickVertex(uint32_t frameID, uint32_t eventID, MeshDisplay cfg, uint32_t x, uint32_t y)
+{
+	WrappedOpenGL &gl = *m_pDriver;
+
+	MakeCurrentReplayContext(m_DebugCtx);
+
+	gl.glUseProgram(DebugData.meshPickProgram);
+
+	GLint loc = gl.glGetUniformLocation(DebugData.meshPickProgram, "PickCoords");
+	gl.glUniform2f(loc, (float)x, (float)y);
+	loc = gl.glGetUniformLocation(DebugData.meshPickProgram, "PickViewport");
+	gl.glUniform2f(loc, DebugData.outWidth, DebugData.outHeight);
+	loc = gl.glGetUniformLocation(DebugData.meshPickProgram, "PickIdx");
+	gl.glUniform1ui(loc, cfg.position.idxByteWidth ? 1U : 0U);
+	loc = gl.glGetUniformLocation(DebugData.meshPickProgram, "PickNumVerts");
+	gl.glUniform1ui(loc, cfg.position.numVerts);
+
+	Matrix4f projMat = Matrix4f::Perspective(90.0f, 0.1f, 100000.0f, DebugData.outWidth/DebugData.outHeight);
+
+	Matrix4f camMat = cfg.cam ? cfg.cam->GetMatrix() : Matrix4f::Identity();
+	Matrix4f PickMVP = projMat.Mul(camMat);
+
+	ResourceFormat resFmt;
+	resFmt.compByteWidth = cfg.position.compByteWidth;
+	resFmt.compCount = cfg.position.compCount;
+	resFmt.compType = cfg.position.compType;
+	resFmt.special = false;
+	if(cfg.position.specialFormat != eSpecial_Unknown)
+	{
+		resFmt.special = true;
+		resFmt.specialFormat = cfg.position.specialFormat;
+	}
+
+	if(cfg.position.unproject)
+	{
+		// the derivation of the projection matrix might not be right (hell, it could be an
+		// orthographic projection). But it'll be close enough likely.
+		Matrix4f guessProj = Matrix4f::Perspective(cfg.fov, cfg.position.nearPlane, cfg.position.farPlane, cfg.aspect);
+
+		if(cfg.ortho)
+			guessProj = Matrix4f::Orthographic(cfg.position.nearPlane, cfg.position.farPlane);
+
+		PickMVP = projMat.Mul(camMat.Mul(guessProj.Inverse()));
+	}
+
+	loc = gl.glGetUniformLocation(DebugData.meshPickProgram, "PickMVP");
+	gl.glUniformMatrix4fv(loc, 1, GL_FALSE, PickMVP.Data());
+
+	GLenum ifmt = cfg.position.idxByteWidth == 4 ? eGL_UNSIGNED_INT
+	            : cfg.position.idxByteWidth == 2 ? eGL_UNSIGNED_SHORT
+							: eGL_UNSIGNED_BYTE;
+
+	GLuint ib = 0;
+
+	if(cfg.position.idxByteWidth && cfg.position.idxbuf != ResourceId())
+		ib = m_pDriver->GetResourceManager()->GetCurrentResource(cfg.position.idxbuf).name;
+
+	// We copy into our own buffers to promote to the target type (uint32) that the
+	// shader expects. Most IBs will be 16-bit indices, most VBs will not be float4.
+
+	if(ib)
+	{
+		// resize up on demand
+		if(DebugData.pickIBBuf == 0 || DebugData.pickIBSize < cfg.position.numVerts*sizeof(uint32_t))
+		{
+			gl.glDeleteBuffers(1, &DebugData.pickIBBuf);
+
+			gl.glGenBuffers(1, &DebugData.pickIBBuf);
+			gl.glBindBuffer(eGL_SHADER_STORAGE_BUFFER, DebugData.pickIBBuf);
+			gl.glNamedBufferStorageEXT(DebugData.pickIBBuf, cfg.position.numVerts*sizeof(uint32_t), NULL, GL_DYNAMIC_STORAGE_BIT);
+
+			DebugData.pickIBSize = cfg.position.numVerts*sizeof(uint32_t);
+		}
+
+		byte *idxs = new byte[cfg.position.numVerts*cfg.position.idxByteWidth];
+		uint32_t *outidxs = NULL;
+
+		if(cfg.position.idxByteWidth < 4)
+			outidxs = new uint32_t[cfg.position.numVerts];
+
+		gl.glBindBuffer(eGL_COPY_READ_BUFFER, ib);
+		gl.glGetBufferSubData(eGL_COPY_READ_BUFFER, cfg.position.idxoffs, cfg.position.numVerts*cfg.position.idxByteWidth, idxs);
+
+		uint16_t *idxs16 = (uint16_t *)idxs;
+
+		if(cfg.position.idxByteWidth == 1)
+		{
+			for(uint32_t i=0; i < cfg.position.numVerts; i++)
+				outidxs[i] = idxs[i];
+
+			gl.glBindBuffer(eGL_SHADER_STORAGE_BUFFER, DebugData.pickIBBuf);
+			gl.glBufferSubData(eGL_SHADER_STORAGE_BUFFER, 0, cfg.position.numVerts*sizeof(uint32_t), outidxs);
+		}
+		else if(cfg.position.idxByteWidth == 2)
+		{
+			for(uint32_t i=0; i < cfg.position.numVerts; i++)
+				outidxs[i] = idxs16[i];
+
+			gl.glBindBuffer(eGL_SHADER_STORAGE_BUFFER, DebugData.pickIBBuf);
+			gl.glBufferSubData(eGL_SHADER_STORAGE_BUFFER, 0, cfg.position.numVerts*sizeof(uint32_t), outidxs);
+		}
+		else
+		{
+			gl.glBindBuffer(eGL_SHADER_STORAGE_BUFFER, DebugData.pickIBBuf);
+			gl.glBufferSubData(eGL_SHADER_STORAGE_BUFFER, 0, cfg.position.numVerts*sizeof(uint32_t), idxs);
+		}
+
+		SAFE_DELETE_ARRAY(outidxs);
+	}
+
+	if(DebugData.pickVBBuf == 0 || DebugData.pickVBSize < cfg.position.numVerts*sizeof(uint32_t))
+	{
+		gl.glDeleteBuffers(1, &DebugData.pickVBBuf);
+
+		gl.glGenBuffers(1, &DebugData.pickVBBuf);
+		gl.glBindBuffer(eGL_SHADER_STORAGE_BUFFER, DebugData.pickVBBuf);
+		gl.glNamedBufferStorageEXT(DebugData.pickVBBuf, cfg.position.numVerts*sizeof(Vec4f), NULL, GL_DYNAMIC_STORAGE_BIT);
+
+		DebugData.pickVBSize = cfg.position.numVerts*sizeof(Vec4f);
+	}
+
+	// unpack and linearise the data
+	{
+		FloatVector *vbData = new FloatVector[cfg.position.numVerts];
+
+		vector<byte> oldData = GetBufferData(cfg.position.buf, cfg.position.offset, 0);
+
+		byte *data = &oldData[0];
+		byte *dataEnd = data + oldData.size();
+
+		bool valid;
+
+		for(uint32_t i=0; i < cfg.position.numVerts; i++)
+			vbData[i] = InterpretVertex(data, i, cfg, dataEnd, false, valid);
+
+		gl.glBindBuffer(eGL_SHADER_STORAGE_BUFFER, DebugData.pickVBBuf);
+		gl.glBufferSubData(eGL_SHADER_STORAGE_BUFFER, 0, cfg.position.numVerts*sizeof(Vec4f), vbData);
+
+		delete[] vbData;
+	}
+
+	uint32_t reset = 0;
+	gl.glBindBufferBase(eGL_ATOMIC_COUNTER_BUFFER, 0, DebugData.pickResultCounterBuf);
+	gl.glBufferSubData(eGL_ATOMIC_COUNTER_BUFFER, 0, sizeof(uint32_t), &reset);
+
+	gl.glBindBufferBase(eGL_SHADER_STORAGE_BUFFER, 0, DebugData.pickResultBuf);
+	gl.glBindBufferBase(eGL_SHADER_STORAGE_BUFFER, 1, DebugData.pickVBBuf);
+	gl.glBindBufferRange(eGL_SHADER_STORAGE_BUFFER, 2, DebugData.pickIBBuf,
+	                     cfg.position.idxoffs, cfg.position.idxoffs + cfg.position.idxByteWidth*cfg.position.numVerts);
+
+	gl.glDispatchCompute(GLuint(cfg.position.numVerts/1024 + 1), 1, 1);
+	gl.glMemoryBarrier(GL_ATOMIC_COUNTER_BARRIER_BIT|GL_SHADER_STORAGE_BARRIER_BIT);
+
+	uint32_t numResults = 0;
+
+	gl.glBindBuffer(eGL_COPY_READ_BUFFER, DebugData.pickResultCounterBuf);
+	gl.glGetBufferSubData(eGL_COPY_READ_BUFFER, 0, sizeof(uint32_t), &numResults);
+
+	if(numResults > 0)
+	{
+		struct PickResult
+		{
+			uint32_t vertid; uint32_t idx; float len; float depth;
+		};
+
+		PickResult *pickResults = (PickResult *)gl.glMapNamedBufferEXT(DebugData.pickResultBuf, eGL_READ_ONLY);
+
+		PickResult *closest = pickResults;
+
+		// min with size of results buffer to protect against overflows
+		for(uint32_t i=1; i < RDCMIN((uint32_t)DebugRenderData::maxMeshPicks, numResults); i++)
+		{
+			// We need to keep the picking order consistent in the face
+			// of random buffer appends, when multiple vertices have the
+			// identical position (e.g. if UVs or normals are different).
+			//
+			// We could do something to try and disambiguate, but it's
+			// never going to be intuitive, it's just going to flicker
+			// confusingly.
+			if(pickResults[i].len < closest->len ||
+			   (pickResults[i].len == closest->len && pickResults[i].depth < closest->depth) ||
+			   (pickResults[i].len == closest->len && pickResults[i].depth == closest->depth && pickResults[i].vertid < closest->vertid))
+				closest = pickResults+i;
+		}
+
+		uint32_t ret = closest->vertid;
+
+		gl.glUnmapNamedBufferEXT(DebugData.pickResultBuf);
+
+		return ret;
+	}
+
+	return ~0U;
 }
 
 void GLReplay::PickPixel(ResourceId texture, uint32_t x, uint32_t y, uint32_t sliceFace, uint32_t mip, uint32_t sample, float pixel[4])
@@ -3012,11 +3227,11 @@ MeshFormat GLReplay::GetPostVSBuffers(uint32_t frameID, uint32_t eventID, uint32
 	return ret;
 }
 
-FloatVector GLReplay::InterpretVertex(byte *data, uint32_t vert, MeshDisplay cfg, byte *end, bool &valid)
+FloatVector GLReplay::InterpretVertex(byte *data, uint32_t vert, MeshDisplay cfg, byte *end, bool useidx, bool &valid)
 {
 	FloatVector ret(0.0f, 0.0f, 0.0f, 1.0f);
 
-	if(m_HighlightCache.useidx)
+	if(useidx && m_HighlightCache.useidx)
 	{
 		if(vert >= (uint32_t)m_HighlightCache.indices.size())
 		{
@@ -3116,13 +3331,7 @@ void GLReplay::RenderMesh(uint32_t frameID, uint32_t eventID, const vector<MeshF
 	
 	Matrix4f projMat = Matrix4f::Perspective(90.0f, 0.1f, 100000.0f, DebugData.outWidth/DebugData.outHeight);
 
-	Camera cam;
-	if(cfg.arcballCamera)
-		cam.Arcball(cfg.cameraPos.x, Vec3f(cfg.cameraRot.x, cfg.cameraRot.y, cfg.cameraRot.z));
-	else
-		cam.fpsLook(Vec3f(cfg.cameraPos.x, cfg.cameraPos.y, cfg.cameraPos.z), Vec3f(cfg.cameraRot.x, cfg.cameraRot.y, cfg.cameraRot.z));
-
-	Matrix4f camMat = cam.GetMatrix();
+	Matrix4f camMat = cfg.cam ? cfg.cam->GetMatrix() : Matrix4f::Identity();
 
 	Matrix4f ModelViewProj = projMat.Mul(camMat);
 	Matrix4f guessProjInv;
@@ -3294,10 +3503,11 @@ void GLReplay::RenderMesh(uint32_t frameID, uint32_t eventID, const vector<MeshF
 	gl.glEnableVertexAttribArray(0);
 	gl.glDisableVertexAttribArray(1);
 
+	gl.glEnable(eGL_DEPTH_TEST);
+
 	// solid render
 	if(cfg.solidShadeMode != eShade_None && topo != eGL_PATCHES)
 	{
-		gl.glEnable(eGL_DEPTH_TEST);
 		gl.glDepthFunc(eGL_LESS);
 
 		GLuint solidProg = prog;
@@ -3364,7 +3574,7 @@ void GLReplay::RenderMesh(uint32_t frameID, uint32_t eventID, const vector<MeshF
 		gl.glUseProgram(prog);
 	}
 	
-	gl.glDisable(eGL_DEPTH_TEST);
+	gl.glDepthFunc(eGL_ALWAYS);
 
 	// wireframe render
 	if(cfg.solidShadeMode == eShade_None || cfg.wireframeDraw || topo == eGL_PATCHES)
@@ -3403,6 +3613,60 @@ void GLReplay::RenderMesh(uint32_t frameID, uint32_t eventID, const vector<MeshF
 		}
 	}
 	
+	if(cfg.showBBox)
+	{
+		Vec4f a = Vec4f(cfg.minBounds.x, cfg.minBounds.y, cfg.minBounds.z, cfg.minBounds.w);
+		Vec4f b = Vec4f(cfg.maxBounds.x, cfg.maxBounds.y, cfg.maxBounds.z, cfg.maxBounds.w);
+
+		Vec4f TLN = Vec4f(a.x, b.y, a.z, 1.0f); // TopLeftNear, etc...
+		Vec4f TRN = Vec4f(b.x, b.y, a.z, 1.0f);
+		Vec4f BLN = Vec4f(a.x, a.y, a.z, 1.0f);
+		Vec4f BRN = Vec4f(b.x, a.y, a.z, 1.0f);
+
+		Vec4f TLF = Vec4f(a.x, b.y, b.z, 1.0f);
+		Vec4f TRF = Vec4f(b.x, b.y, b.z, 1.0f);
+		Vec4f BLF = Vec4f(a.x, a.y, b.z, 1.0f);
+		Vec4f BRF = Vec4f(b.x, a.y, b.z, 1.0f);
+
+		// 12 frustum lines => 24 verts
+		Vec4f bbox[24] =
+		{
+			TLN, TRN,
+			TRN, BRN,
+			BRN, BLN,
+			BLN, TLN,
+
+			TLN, TLF,
+			TRN, TRF,
+			BLN, BLF,
+			BRN, BRF,
+
+			TLF, TRF,
+			TRF, BRF,
+			BRF, BLF,
+			BLF, TLF,
+		};
+
+		gl.glBindBuffer(eGL_ARRAY_BUFFER, DebugData.triHighlightBuffer);
+		gl.glBufferSubData(eGL_ARRAY_BUFFER, 0, sizeof(bbox), &bbox[0]);
+
+		gl.glBindVertexArray(DebugData.triHighlightVAO);
+
+		float wireCol[] = { 0.2f, 0.2f, 1.0f, 1.0f };
+		gl.glUniform4fv(colLoc, 1, wireCol);
+
+		Matrix4f mvpMat = projMat.Mul(camMat);
+
+		gl.glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvpMat.Data());
+
+		// we want this to clip
+		gl.glDepthFunc(eGL_LESS);
+
+		gl.glDrawArrays(eGL_LINES, 0, 24);
+
+		gl.glDepthFunc(eGL_ALWAYS);
+	}
+
 	// draw axis helpers
 	if(!cfg.position.unproject)
 	{
@@ -3533,7 +3797,7 @@ void GLReplay::RenderMesh(uint32_t frameID, uint32_t eventID, const vector<MeshF
 			primTopo = eGL_LINES;
 		}
 		
-		activeVertex = InterpretVertex(data, idx, cfg, dataEnd, valid);
+		activeVertex = InterpretVertex(data, idx, cfg, dataEnd, true, valid);
 
 		// see Section 10.1 of the OpenGL 4.5 spec for
 		// how primitive topologies are laid out
@@ -3541,26 +3805,26 @@ void GLReplay::RenderMesh(uint32_t frameID, uint32_t eventID, const vector<MeshF
 		{
 			uint32_t v = uint32_t(idx/2) * 2; // find first vert in primitive
 
-			activePrim.push_back(InterpretVertex(data, v+0, cfg, dataEnd, valid));
-			activePrim.push_back(InterpretVertex(data, v+1, cfg, dataEnd, valid));
+			activePrim.push_back(InterpretVertex(data, v+0, cfg, dataEnd, true, valid));
+			activePrim.push_back(InterpretVertex(data, v+1, cfg, dataEnd, true, valid));
 		}
 		else if(meshtopo == eGL_TRIANGLES)
 		{
 			uint32_t v = uint32_t(idx/3) * 3; // find first vert in primitive
 
-			activePrim.push_back(InterpretVertex(data, v+0, cfg, dataEnd, valid));
-			activePrim.push_back(InterpretVertex(data, v+1, cfg, dataEnd, valid));
-			activePrim.push_back(InterpretVertex(data, v+2, cfg, dataEnd, valid));
+			activePrim.push_back(InterpretVertex(data, v+0, cfg, dataEnd, true, valid));
+			activePrim.push_back(InterpretVertex(data, v+1, cfg, dataEnd, true, valid));
+			activePrim.push_back(InterpretVertex(data, v+2, cfg, dataEnd, true, valid));
 		}
 		else if(meshtopo == eGL_LINES_ADJACENCY)
 		{
 			uint32_t v = uint32_t(idx/4) * 4; // find first vert in primitive
 			
 			FloatVector vs[] = {
-				InterpretVertex(data, v+0, cfg, dataEnd, valid),
-				InterpretVertex(data, v+1, cfg, dataEnd, valid),
-				InterpretVertex(data, v+2, cfg, dataEnd, valid),
-				InterpretVertex(data, v+3, cfg, dataEnd, valid),
+				InterpretVertex(data, v+0, cfg, dataEnd, true, valid),
+				InterpretVertex(data, v+1, cfg, dataEnd, true, valid),
+				InterpretVertex(data, v+2, cfg, dataEnd, true, valid),
+				InterpretVertex(data, v+3, cfg, dataEnd, true, valid),
 			};
 
 			adjacentPrimVertices.push_back(vs[0]);
@@ -3577,12 +3841,12 @@ void GLReplay::RenderMesh(uint32_t frameID, uint32_t eventID, const vector<MeshF
 			uint32_t v = uint32_t(idx/6) * 6; // find first vert in primitive
 			
 			FloatVector vs[] = {
-				InterpretVertex(data, v+0, cfg, dataEnd, valid),
-				InterpretVertex(data, v+1, cfg, dataEnd, valid),
-				InterpretVertex(data, v+2, cfg, dataEnd, valid),
-				InterpretVertex(data, v+3, cfg, dataEnd, valid),
-				InterpretVertex(data, v+4, cfg, dataEnd, valid),
-				InterpretVertex(data, v+5, cfg, dataEnd, valid),
+				InterpretVertex(data, v+0, cfg, dataEnd, true, valid),
+				InterpretVertex(data, v+1, cfg, dataEnd, true, valid),
+				InterpretVertex(data, v+2, cfg, dataEnd, true, valid),
+				InterpretVertex(data, v+3, cfg, dataEnd, true, valid),
+				InterpretVertex(data, v+4, cfg, dataEnd, true, valid),
+				InterpretVertex(data, v+5, cfg, dataEnd, true, valid),
 			};
 
 			adjacentPrimVertices.push_back(vs[0]);
@@ -3609,8 +3873,8 @@ void GLReplay::RenderMesh(uint32_t frameID, uint32_t eventID, const vector<MeshF
 			// primitive, and thereafter each point is in the next primitive
 			uint32_t v = RDCMAX(idx, 1U) - 1;
 			
-			activePrim.push_back(InterpretVertex(data, v+0, cfg, dataEnd, valid));
-			activePrim.push_back(InterpretVertex(data, v+1, cfg, dataEnd, valid));
+			activePrim.push_back(InterpretVertex(data, v+0, cfg, dataEnd, true, valid));
+			activePrim.push_back(InterpretVertex(data, v+1, cfg, dataEnd, true, valid));
 		}
 		else if(meshtopo == eGL_TRIANGLE_STRIP)
 		{
@@ -3620,9 +3884,9 @@ void GLReplay::RenderMesh(uint32_t frameID, uint32_t eventID, const vector<MeshF
 			// primitive, and thereafter each point is in the next primitive
 			uint32_t v = RDCMAX(idx, 2U) - 2;
 			
-			activePrim.push_back(InterpretVertex(data, v+0, cfg, dataEnd, valid));
-			activePrim.push_back(InterpretVertex(data, v+1, cfg, dataEnd, valid));
-			activePrim.push_back(InterpretVertex(data, v+2, cfg, dataEnd, valid));
+			activePrim.push_back(InterpretVertex(data, v+0, cfg, dataEnd, true, valid));
+			activePrim.push_back(InterpretVertex(data, v+1, cfg, dataEnd, true, valid));
+			activePrim.push_back(InterpretVertex(data, v+2, cfg, dataEnd, true, valid));
 		}
 		else if(meshtopo == eGL_LINE_STRIP_ADJACENCY)
 		{
@@ -3633,10 +3897,10 @@ void GLReplay::RenderMesh(uint32_t frameID, uint32_t eventID, const vector<MeshF
 			uint32_t v = RDCMAX(idx, 3U) - 3;
 			
 			FloatVector vs[] = {
-				InterpretVertex(data, v+0, cfg, dataEnd, valid),
-				InterpretVertex(data, v+1, cfg, dataEnd, valid),
-				InterpretVertex(data, v+2, cfg, dataEnd, valid),
-				InterpretVertex(data, v+3, cfg, dataEnd, valid),
+				InterpretVertex(data, v+0, cfg, dataEnd, true, valid),
+				InterpretVertex(data, v+1, cfg, dataEnd, true, valid),
+				InterpretVertex(data, v+2, cfg, dataEnd, true, valid),
+				InterpretVertex(data, v+3, cfg, dataEnd, true, valid),
 			};
 
 			adjacentPrimVertices.push_back(vs[0]);
@@ -3664,18 +3928,18 @@ void GLReplay::RenderMesh(uint32_t frameID, uint32_t eventID, const vector<MeshF
 			else if(idx <= 4 || numidx <= 7)
 			{
 				FloatVector vs[] = {
-					InterpretVertex(data, 0, cfg, dataEnd, valid),
-					InterpretVertex(data, 1, cfg, dataEnd, valid),
-					InterpretVertex(data, 2, cfg, dataEnd, valid),
-					InterpretVertex(data, 3, cfg, dataEnd, valid),
-					InterpretVertex(data, 4, cfg, dataEnd, valid),
+					InterpretVertex(data, 0, cfg, dataEnd, true, valid),
+					InterpretVertex(data, 1, cfg, dataEnd, true, valid),
+					InterpretVertex(data, 2, cfg, dataEnd, true, valid),
+					InterpretVertex(data, 3, cfg, dataEnd, true, valid),
+					InterpretVertex(data, 4, cfg, dataEnd, true, valid),
 
 					// note this one isn't used as it's adjacency for the next triangle
-					InterpretVertex(data, 5, cfg, dataEnd, valid),
+					InterpretVertex(data, 5, cfg, dataEnd, true, valid),
 
 					// min() with number of indices in case this is a tiny strip
 					// that is basically just a list
-					InterpretVertex(data, RDCMIN(6U, numidx-1), cfg, dataEnd, valid),
+					InterpretVertex(data, RDCMIN(6U, numidx-1), cfg, dataEnd, true, valid),
 				};
 
 				// these are the triangles on the far left of the MSDN diagram above
@@ -3700,18 +3964,18 @@ void GLReplay::RenderMesh(uint32_t frameID, uint32_t eventID, const vector<MeshF
 				// in diagram, numidx == 14
 
 				FloatVector vs[] = {
-					/*[0]=*/ InterpretVertex(data, numidx-8, cfg, dataEnd, valid), // 6 in diagram
+					/*[0]=*/ InterpretVertex(data, numidx-8, cfg, dataEnd, true, valid), // 6 in diagram
 
 					// as above, unused since this is adjacency for 2-previous triangle
-					/*[1]=*/ InterpretVertex(data, numidx-7, cfg, dataEnd, valid), // 7 in diagram
-					/*[2]=*/ InterpretVertex(data, numidx-6, cfg, dataEnd, valid), // 8 in diagram
+					/*[1]=*/ InterpretVertex(data, numidx-7, cfg, dataEnd, true, valid), // 7 in diagram
+					/*[2]=*/ InterpretVertex(data, numidx-6, cfg, dataEnd, true, valid), // 8 in diagram
 					
 					// as above, unused since this is adjacency for previous triangle
-					/*[3]=*/ InterpretVertex(data, numidx-5, cfg, dataEnd, valid), // 9 in diagram
-					/*[4]=*/ InterpretVertex(data, numidx-4, cfg, dataEnd, valid), // 10 in diagram
-					/*[5]=*/ InterpretVertex(data, numidx-3, cfg, dataEnd, valid), // 11 in diagram
-					/*[6]=*/ InterpretVertex(data, numidx-2, cfg, dataEnd, valid), // 12 in diagram
-					/*[7]=*/ InterpretVertex(data, numidx-1, cfg, dataEnd, valid), // 13 in diagram
+					/*[3]=*/ InterpretVertex(data, numidx-5, cfg, dataEnd, true, valid), // 9 in diagram
+					/*[4]=*/ InterpretVertex(data, numidx-4, cfg, dataEnd, true, valid), // 10 in diagram
+					/*[5]=*/ InterpretVertex(data, numidx-3, cfg, dataEnd, true, valid), // 11 in diagram
+					/*[6]=*/ InterpretVertex(data, numidx-2, cfg, dataEnd, true, valid), // 12 in diagram
+					/*[7]=*/ InterpretVertex(data, numidx-1, cfg, dataEnd, true, valid), // 13 in diagram
 				};
 
 				// these are the triangles on the far right of the MSDN diagram above
@@ -3741,19 +4005,19 @@ void GLReplay::RenderMesh(uint32_t frameID, uint32_t eventID, const vector<MeshF
 				// these correspond to the indices in the MSDN diagram, with {2,4,6} as the
 				// main triangle
 				FloatVector vs[] = {
-					InterpretVertex(data, v+0, cfg, dataEnd, valid),
+					InterpretVertex(data, v+0, cfg, dataEnd, true, valid),
 
 					// this one is adjacency for 2-previous triangle
-					InterpretVertex(data, v+1, cfg, dataEnd, valid),
-					InterpretVertex(data, v+2, cfg, dataEnd, valid),
+					InterpretVertex(data, v+1, cfg, dataEnd, true, valid),
+					InterpretVertex(data, v+2, cfg, dataEnd, true, valid),
 
 					// this one is adjacency for previous triangle
-					InterpretVertex(data, v+3, cfg, dataEnd, valid),
-					InterpretVertex(data, v+4, cfg, dataEnd, valid),
-					InterpretVertex(data, v+5, cfg, dataEnd, valid),
-					InterpretVertex(data, v+6, cfg, dataEnd, valid),
-					InterpretVertex(data, v+7, cfg, dataEnd, valid),
-					InterpretVertex(data, v+8, cfg, dataEnd, valid),
+					InterpretVertex(data, v+3, cfg, dataEnd, true, valid),
+					InterpretVertex(data, v+4, cfg, dataEnd, true, valid),
+					InterpretVertex(data, v+5, cfg, dataEnd, true, valid),
+					InterpretVertex(data, v+6, cfg, dataEnd, true, valid),
+					InterpretVertex(data, v+7, cfg, dataEnd, true, valid),
+					InterpretVertex(data, v+8, cfg, dataEnd, true, valid),
 				};
 
 				// these are the triangles around {2,4,6} in the MSDN diagram above
@@ -3783,7 +4047,7 @@ void GLReplay::RenderMesh(uint32_t frameID, uint32_t eventID, const vector<MeshF
 			for(uint32_t v = v0; v < v0+dim; v++)
 			{
 				if(v != idx && valid)
-					inactiveVertices.push_back(InterpretVertex(data, v, cfg, dataEnd, valid));
+					inactiveVertices.push_back(InterpretVertex(data, v, cfg, dataEnd, true, valid));
 			}
 		}
 		else // if(meshtopo == eGL_POINTS) point list, or unknown/unhandled type

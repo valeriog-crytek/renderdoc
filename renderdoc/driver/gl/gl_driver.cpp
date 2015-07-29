@@ -26,6 +26,8 @@
 #include "common/common.h"
 #include "gl_driver.h"
 
+#include "driver/shaders/spirv/spirv_common.h"
+
 #include "serialise/string_utils.h"
 
 #include "replay/type_helpers.h"
@@ -381,6 +383,7 @@ WrappedOpenGL::WrappedOpenGL(const char *logfile, const GLHookSet &funcs)
 	globalExts.push_back("GL_ARB_depth_clamp");
 	globalExts.push_back("GL_ARB_depth_texture");
 	globalExts.push_back("GL_ARB_derivative_control");
+	globalExts.push_back("GL_ARB_direct_state_access");
 	globalExts.push_back("GL_ARB_draw_buffers");
 	globalExts.push_back("GL_ARB_draw_buffers_blend");
 	globalExts.push_back("GL_ARB_draw_elements_base_vertex");
@@ -575,7 +578,6 @@ WrappedOpenGL::WrappedOpenGL(const char *logfile, const GLHookSet &funcs)
 	Only very important/commonly used vendor extensions will be supported, generally I'll
 	stick to ARB, EXT and KHR.
 
-	* GL_ARB_direct_state_access (Required for 4.5)
 	* GL_ARB_bindless_texture
 	* GL_ARB_cl_event
 	* GL_ARB_sparse_buffer
@@ -668,14 +670,14 @@ WrappedOpenGL::WrappedOpenGL(const char *logfile, const GLHookSet &funcs)
 	// sorts are identical so we can do the intersection easily
 	std::sort(globalExts.begin(), globalExts.end());
 
-#if !defined(_RELEASE)
-	CaptureOptions &opts = (CaptureOptions &)RenderDoc::Inst().GetCaptureOptions();
-	opts.RefAllResources = true;
-#endif
-
 	m_Replay.SetDriver(this);
 
 	m_FrameCounter = 0;
+	m_FailedFrame = 0;
+	m_FailedReason = CaptureSucceeded;
+	m_Failures = 0;
+	m_SuccessfulCapture = true;
+	m_FailureReason = CaptureSucceeded;
 
 	m_FrameTimer.Restart();
 
@@ -699,20 +701,12 @@ WrappedOpenGL::WrappedOpenGL(const char *logfile, const GLHookSet &funcs)
 	m_ActiveConditional = false;
 	m_ActiveFeedback = false;
 	
-	m_DisplayListRecord = NULL;
-	
-#if defined(RELEASE)
-	const bool debugSerialiser = false;
-#else
-	const bool debugSerialiser = true;
-#endif
-
 	if(RenderDoc::Inst().IsReplayApp())
 	{
 		m_State = READING;
 		if(logfile)
 		{
-			m_pSerialiser = new Serialiser(logfile, Serialiser::READING, debugSerialiser);
+			m_pSerialiser = new Serialiser(logfile, Serialiser::READING, false);
 		}
 		else
 		{
@@ -720,6 +714,7 @@ WrappedOpenGL::WrappedOpenGL(const char *logfile, const GLHookSet &funcs)
 			m_pSerialiser = new Serialiser(4, dummy, false);
 		}
 
+		// once GL driver is more tested, this can be disabled
 		if(m_Real.glDebugMessageCallback)
 		{
 			m_Real.glDebugMessageCallback(&DebugSnoopStatic, this);
@@ -729,7 +724,7 @@ WrappedOpenGL::WrappedOpenGL(const char *logfile, const GLHookSet &funcs)
 	else
 	{
 		m_State = WRITING_IDLE;
-		m_pSerialiser = new Serialiser(NULL, Serialiser::WRITING, debugSerialiser);
+		m_pSerialiser = new Serialiser(NULL, Serialiser::WRITING, false);
 	}
 
 	m_DeviceRecord = NULL;
@@ -760,14 +755,15 @@ WrappedOpenGL::WrappedOpenGL(const char *logfile, const GLHookSet &funcs)
 		m_FakeVAOID = GetResourceManager()->RegisterResource(VertexArrayRes(NULL, 0));
 		GetResourceManager()->AddResourceRecord(m_FakeVAOID);
 		GetResourceManager()->MarkDirtyResource(m_FakeVAOID);
-
-		RenderDoc::Inst().AddDefaultFrameCapturer(this);
 	}
 	else
 	{
 		m_DeviceRecord = m_ContextRecord = NULL;
 
 		TrackedResource::SetReplayResourceIDs();
+
+		InitSPIRVCompiler();
+		RenderDoc::Inst().RegisterShutdownFunction(&ShutdownSPIRVCompiler);
 	}
 
 	m_FakeBB_FBO = 0;
@@ -909,8 +905,6 @@ WrappedOpenGL::~WrappedOpenGL()
 	if(m_FakeBB_Color) m_Real.glDeleteTextures(1, &m_FakeBB_Color);
 	if(m_FakeBB_DepthStencil) m_Real.glDeleteTextures(1, &m_FakeBB_DepthStencil);
 
-	RenderDoc::Inst().RemoveDefaultFrameCapturer(this);
-
 	SAFE_DELETE(m_pSerialiser);
 
 	GetResourceManager()->ReleaseCurrentResource(m_DeviceResourceID);
@@ -962,6 +956,8 @@ void WrappedOpenGL::DeleteContext(void *contextHandle)
 {
 	ContextData &ctxdata = m_ContextData[contextHandle];
 
+	RenderDoc::Inst().RemoveDeviceFrameCapturer(ctxdata.ctx);
+
 	if(ctxdata.built && ctxdata.ready)
 	{
 		if(ctxdata.Program)
@@ -1003,6 +999,16 @@ void WrappedOpenGL::CreateContext(GLWindowingData winData, void *shareContext, G
 	// TODO: support multiple GL contexts more explicitly
 	m_InitParams = initParams;
 
+	ContextData &ctxdata = m_ContextData[winData.ctx];
+	ctxdata.ctx = winData.ctx;
+	ctxdata.isCore = core;
+	ctxdata.attribsCreate = attribsCreate;
+
+	RenderDoc::Inst().AddDeviceFrameCapturer(ctxdata.ctx, this);
+}
+
+void WrappedOpenGL::RegisterContext(GLWindowingData winData, void *shareContext, bool core, bool attribsCreate)
+{
 	ContextData &ctxdata = m_ContextData[winData.ctx];
 	ctxdata.ctx = winData.ctx;
 	ctxdata.isCore = core;
@@ -1109,6 +1115,11 @@ void WrappedOpenGL::ActivateContext(GLWindowingData winData)
 					}
 				}
 			}
+
+			// this extension is something RenderDoc will support even if the impl
+			// doesn't. https://renderdoc.org/debug_tool.txt
+			ctxdata.glExts.push_back("GL_EXT_debug_tool");
+
 			merge(ctxdata.glExts, ctxdata.glExtsString, ' ');
 
 			if(gl.glGetIntegerv)
@@ -1967,6 +1978,8 @@ void WrappedOpenGL::SwapBuffers(void *windowHandle)
 	
 	m_FrameCounter++; // first present becomes frame #1, this function is at the end of the frame
 	
+	GetResourceManager()->FlushPendingDirty();
+
 	ContextData &ctxdata = GetCtxData();
 	
 	// we only handle context-window associations here as it's too common to
@@ -2118,6 +2131,21 @@ void WrappedOpenGL::SwapBuffers(void *windowHandle)
 					}
 				}
 
+				if(m_FailedFrame > 0)
+				{
+					const char *reasonString = "Unknown reason";
+					switch(m_FailedReason)
+					{
+						case CaptureFailed_UncappedUnmap: reasonString = "Uncapped Map()/Unmap()"; break;
+						default: break;
+					}
+
+					RenderOverlayText(0.0f, y, "Failed capture at frame %d:\n", m_FailedFrame);
+					y += 1.0f;
+					RenderOverlayText(0.0f, y, "    %s\n", reasonString);
+					y += 1.0f;
+				}
+
 #if !defined(RELEASE)
 				RenderOverlayText(0.0f, y, "%llu chunks - %.2f MB", Chunk::NumLiveChunks(), float(Chunk::TotalMem())/1024.0f/1024.0f);
 				y += 1.0f;
@@ -2181,15 +2209,11 @@ void WrappedOpenGL::SwapBuffers(void *windowHandle)
 
 	// kill any current capture that isn't application defined
 	if(m_State == WRITING_CAPFRAME && !m_AppControlledCapture)
-		EndFrameCapture(this, windowHandle);
-	
-	// for now, only allow one captured frame at all
-	if(!m_FrameRecord.empty())
-		return;
+		EndFrameCapture(ctxdata.ctx, windowHandle);
 	
 	if(RenderDoc::Inst().ShouldTriggerCapture(m_FrameCounter) && m_State == WRITING_IDLE)
 	{
-		StartFrameCapture(this, windowHandle);
+		StartFrameCapture(ctxdata.ctx, windowHandle);
 
 		m_AppControlledCapture = false;
 	}
@@ -2197,9 +2221,17 @@ void WrappedOpenGL::SwapBuffers(void *windowHandle)
 
 void WrappedOpenGL::StartFrameCapture(void *dev, void *wnd)
 {
+	if(m_State != WRITING_IDLE) return;
+
+	RenderDoc::Inst().SetCurrentDriver(RDC_OpenGL);
+
 	m_State = WRITING_CAPFRAME;
 
 	m_AppControlledCapture = true;
+
+	m_Failures = 0;
+	m_FailedFrame = 0;
+	m_FailedReason = CaptureSucceeded;
 
 	GLWindowingData &prevctx = m_ActiveContexts[Threading::GetCurrentID()];
 
@@ -2220,6 +2252,8 @@ void WrappedOpenGL::StartFrameCapture(void *dev, void *wnd)
 	GetResourceManager()->MarkResourceFrameReferenced(m_DeviceResourceID, eFrameRef_Write);
 	GetResourceManager()->PrepareInitialContents();
 
+	FreeCaptureData();
+
 	AttemptCapture();
 	BeginCaptureFrame();
 
@@ -2235,9 +2269,13 @@ bool WrappedOpenGL::EndFrameCapture(void *dev, void *wnd)
 	
 	CaptureFailReason reason = CaptureSucceeded;
 
-	//if(HasSuccessfulCapture(reason))
+	if(HasSuccessfulCapture(reason))
 	{
 		RDCLOG("Finished capture, Frame %u", m_FrameCounter);
+
+		m_Failures = 0;
+		m_FailedFrame = 0;
+		m_FailedReason = CaptureSucceeded;
 
 		ContextEndFrame();
 		FinishCapture();
@@ -2389,9 +2427,73 @@ bool WrappedOpenGL::EndFrameCapture(void *dev, void *wnd)
 
 		return true;
 	}
-	//else
+	else
 	{
-		// failed to capture
+		RDCLOG("Failed to capture, frame %u", m_FrameCounter);
+
+		m_Failures++;
+
+		if((RenderDoc::Inst().GetOverlayBits() & eOverlay_Enabled))
+		{
+			ContextData &ctxdata = GetCtxData();
+
+			RenderTextState textState;
+
+			textState.Push(m_Real, ctxdata.Modern());
+
+			const char *reasonString = "Unknown reason";
+			switch(reason)
+			{
+				case CaptureFailed_UncappedUnmap: reasonString = "Uncapped Map()/Unmap()"; break;
+				default: break;
+			}
+
+			RenderOverlayText(0.0f, 0.0f, "Failed to capture frame %u: %s", m_FrameCounter, reasonString);
+
+			textState.Pop(m_Real, ctxdata.Modern());
+
+			// swallow all errors we might have inadvertantly caused. This is
+			// better than letting an error propagate and maybe screw up the
+			// app (although it means we might swallow an error from before the
+			// SwapBuffers call, it can't be helped.
+			if(ctxdata.Legacy() && m_Real.glGetError)
+			{
+				GLenum err = m_Real.glGetError();
+				while(err) err = m_Real.glGetError();
+			}
+		}
+
+		m_FrameRecord.back().frameInfo.frameNumber = m_FrameCounter+1;
+
+		CleanupCapture();
+
+		GetResourceManager()->ClearReferencedResources();
+
+		if(m_Failures > 5) // failed too many times
+		{
+			FinishCapture();
+
+			m_FrameRecord.pop_back();
+
+			FreeCaptureData();
+
+			m_FailedFrame = m_FrameCounter;
+			m_FailedReason = reason;
+
+			m_State = WRITING_IDLE;
+
+			GetResourceManager()->MarkUnwrittenResources();
+		}
+		else
+		{
+			GetResourceManager()->MarkResourceFrameReferenced(m_DeviceResourceID, eFrameRef_Write);
+			GetResourceManager()->PrepareInitialContents();
+
+			AttemptCapture();
+			BeginCaptureFrame();
+		}
+
+		return false;
 	}
 }
 
@@ -2440,6 +2542,36 @@ void WrappedOpenGL::ContextEndFrame()
 	m_ContextRecord->AddChunk(scope.Get());
 }
 
+void WrappedOpenGL::CleanupCapture()
+{
+	m_SuccessfulCapture = true;
+	m_FailureReason = CaptureSucceeded;
+
+	m_ContextRecord->LockChunks();
+	while(m_ContextRecord->HasChunks())
+	{
+		Chunk *chunk = m_ContextRecord->GetLastChunk();
+
+		SAFE_DELETE(chunk);
+		m_ContextRecord->PopChunk();
+	}
+	m_ContextRecord->UnlockChunks();
+
+	m_ContextRecord->FreeParents(GetResourceManager());
+
+	for(auto it=m_MissingTracks.begin(); it != m_MissingTracks.end(); ++it)
+	{
+		if(GetResourceManager()->HasResourceRecord(*it))
+			GetResourceManager()->MarkDirtyResource(*it);
+	}
+
+	m_MissingTracks.clear();
+}
+
+void WrappedOpenGL::FreeCaptureData()
+{
+}
+
 void WrappedOpenGL::QueuePrepareInitialState(GLResource res, byte *blob)
 {
 	QueuedInitialStateFetch fetch;
@@ -2459,7 +2591,8 @@ void WrappedOpenGL::AttemptCapture()
 	{
 		RDCDEBUG("GL Context %llu Attempting capture", GetContextResourceID());
 
-		//m_SuccessfulCapture = true;
+		m_SuccessfulCapture = true;
+		m_FailureReason = CaptureSucceeded;
 
 		m_ContextRecord->LockChunks();
 		while(m_ContextRecord->HasChunks())
@@ -2480,6 +2613,8 @@ bool WrappedOpenGL::Serialise_BeginCaptureFrame(bool applyInitialState)
 	if(m_State >= WRITING)
 	{
 		state.FetchState(GetCtx(), this);
+
+		state.MarkReferenced(this, true);
 	}
 
 	state.Serialise(m_State, GetCtx(), this);
@@ -2703,9 +2838,11 @@ void WrappedOpenGL::ReadLogInitialisation()
 
 	m_pSerialiser->Rewind();
 
+	uint32_t captureChunkIdx = 0;
+
 	while(!m_pSerialiser->AtEnd())
 	{
-		m_pSerialiser->SkipToChunk(CAPTURE_SCOPE);
+		m_pSerialiser->SkipToChunk(CAPTURE_SCOPE, &captureChunkIdx);
 
 		// found a capture chunk
 		if(!m_pSerialiser->AtEnd())
@@ -2751,7 +2888,7 @@ void WrappedOpenGL::ReadLogInitialisation()
 
 		m_pSerialiser->PopContext(NULL, context);
 		
-		RenderDoc::Inst().SetProgress(FileInitialRead, float(m_pSerialiser->GetOffset())/float(m_pSerialiser->GetSize()));
+		RenderDoc::Inst().SetProgress(FileInitialRead, float(chunkIdx)/float(captureChunkIdx));
 
 		if(context == CAPTURE_SCOPE)
 		{
@@ -3693,6 +3830,8 @@ void WrappedOpenGL::ContextReplayLog(LogState readType, uint32_t startEventID, u
 
 	GetResourceManager()->MarkInFrame(true);
 
+	uint64_t startOffset = m_pSerialiser->GetOffset();
+
 	while(1)
 	{
 		if(m_State == EXECUTING && m_CurEventID > endEventID)
@@ -3707,7 +3846,7 @@ void WrappedOpenGL::ContextReplayLog(LogState readType, uint32_t startEventID, u
 
 		ContextProcessChunk(offset, chunktype, false);
 		
-		RenderDoc::Inst().SetProgress(FileInitialRead, float(offset)/float(m_pSerialiser->GetSize()));
+		RenderDoc::Inst().SetProgress(FrameEventsRead, float(offset - startOffset)/float(m_pSerialiser->GetSize()));
 		
 		// for now just abort after capture scope. Really we'd need to support multiple frames
 		// but for now this will do.
@@ -3793,7 +3932,6 @@ void WrappedOpenGL::ContextProcessChunk(uint64_t offset, GLChunkType chunk, bool
 	else if(context->m_State == READING && chunk == END_EVENT)
 	{
 		// refuse to pop off further than the root drawcall (mismatched begin/end events e.g.)
-		RDCASSERT(context->m_DrawcallStack.size() > 1);
 		if(context->m_DrawcallStack.size() > 1)
 			context->m_DrawcallStack.pop_back();
 	}
@@ -3947,6 +4085,7 @@ void WrappedOpenGL::AddUsage(FetchDrawcall d)
 					}
 
 					uint32_t *texList = NULL;
+					int32_t listSize = 0;
 					
 					switch(refl[i]->Resources[r].resType)
 					{
@@ -3955,40 +4094,51 @@ void WrappedOpenGL::AddUsage(FetchDrawcall d)
 							break;
 						case eResType_Buffer:
 							texList = rs.TexBuffer;
+							listSize = sizeof(rs.TexBuffer);
 							break;
 						case eResType_Texture1D:
 							texList = rs.Tex1D;
+							listSize = sizeof(rs.Tex1D);
 							break;
 						case eResType_Texture1DArray:
 							texList = rs.Tex1DArray;
+							listSize = sizeof(rs.Tex1DArray);
 							break;
 						case eResType_Texture2D:
 							texList = rs.Tex2D;
+							listSize = sizeof(rs.Tex2D);
 							break;
 						case eResType_TextureRect:
 							texList = rs.TexRect;
+							listSize = sizeof(rs.TexRect);
 							break;
 						case eResType_Texture2DArray:
 							texList = rs.Tex2DArray;
+							listSize = sizeof(rs.Tex2DArray);
 							break;
 						case eResType_Texture2DMS:
 							texList = rs.Tex2DMS;
+							listSize = sizeof(rs.Tex2DMS);
 							break;
 						case eResType_Texture2DMSArray:
 							texList = rs.Tex2DMSArray;
+							listSize = sizeof(rs.Tex2DMSArray);
 							break;
 						case eResType_Texture3D:
 							texList = rs.Tex3D;
+							listSize = sizeof(rs.Tex3D);
 							break;
 						case eResType_TextureCube:
 							texList = rs.TexCube;
+							listSize = sizeof(rs.TexCube);
 							break;
 						case eResType_TextureCubeArray:
 							texList = rs.TexCubeArray;
+							listSize = sizeof(rs.TexCubeArray);
 							break;
 					}
 					
-					if(texList != NULL && texList[bind] != 0)
+					if(texList != NULL && bind >= 0 && bind < listSize && texList[bind] != 0)
 						m_ResourceUses[rm->GetID(TextureRes(ctx, texList[bind]))].push_back(res);
 				}
 			}

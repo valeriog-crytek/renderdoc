@@ -123,8 +123,8 @@ namespace renderdocui.Windows
             public Thread m_DataParseThread = null;
             private Object m_ThreadLock = new Object();
 
-            public Vec3f m_MinBounds = new Vec3f(float.MaxValue, float.MaxValue, float.MaxValue);
-            public Vec3f m_MaxBounds = new Vec3f(-float.MaxValue, -float.MaxValue, -float.MaxValue);
+            public Vec3f[] m_MinBounds = null;
+            public Vec3f[] m_MaxBounds = null;
 
             public void AbortThread()
             {
@@ -204,8 +204,6 @@ namespace renderdocui.Windows
 
         // Cameras
         private TimedUpdate m_Updater = null;
-
-        private Camera m_Camera = new Camera();
 
         private ArcballCamera m_Arcball = null;
         private FlyCamera m_Flycam = null;
@@ -300,8 +298,13 @@ namespace renderdocui.Windows
             m_MeshDisplay.currentMeshColour = new FloatVector(1, 0, 0, 1);
             m_MeshDisplay.prevMeshColour = new FloatVector(0, 0, 0, 1);
 
-            m_Arcball = new ArcballCamera(m_Camera);
-            m_Flycam = new FlyCamera(m_Camera);
+            if (m_Arcball != null)
+                m_Arcball.Camera.Shutdown();
+            if (m_Flycam != null)
+                m_Flycam.Camera.Shutdown();
+
+            m_Arcball = new ArcballCamera();
+            m_Flycam = new FlyCamera();
             m_CurrentCamera = m_Arcball;
             m_Updater = new TimedUpdate(10, TimerUpdate);
 
@@ -824,9 +827,19 @@ namespace renderdocui.Windows
 
                 ret.GenericValues = new object[vinputs.Length][];
 
+                int numinputs = vinputs.Length;
+
                 int i = 0;
                 foreach (var a in vinputs)
                 {
+                    if (!a.Used)
+                    {
+                        numinputs--;
+                        Array.Resize(ref f, numinputs);
+                        Array.Resize(ref ret.GenericValues, numinputs);
+                        continue;
+                    }
+
                     f[i] = new FormatElement(a.Name,
                                              a.VertexBuffer,
                                              a.RelativeByteOffset,
@@ -1321,8 +1334,8 @@ namespace renderdocui.Windows
                 state.m_Stream = new Stream[d.Length];
                 state.m_Reader = new BinaryReader[d.Length];
 
-                state.m_MinBounds = new Vec3f(-1.0f, -1.0f, -1.0f);
-                state.m_MaxBounds = new Vec3f(1.0f, 1.0f, 1.0f);
+                state.m_MinBounds = null;
+                state.m_MaxBounds = null;
 
                 var bufferFormats = input.BufferFormats;
 
@@ -1387,8 +1400,19 @@ namespace renderdocui.Windows
                 var bufferFormats = input.BufferFormats;
                 var generics = input.GenericValues;
 
-                Vec3f minBounds = new Vec3f(float.MaxValue, float.MaxValue, float.MaxValue);
-                Vec3f maxBounds = new Vec3f(-float.MaxValue, -float.MaxValue, -float.MaxValue);
+                Vec3f[] minBounds = new Vec3f[bufferFormats.Length];
+                Vec3f[] maxBounds = new Vec3f[bufferFormats.Length];
+
+                for (int el = 0; el < bufferFormats.Length; el++)
+                {
+                    minBounds[el] = new Vec3f(float.MaxValue, float.MaxValue, float.MaxValue);
+                    maxBounds[el] = new Vec3f(-float.MaxValue, -float.MaxValue, -float.MaxValue);
+
+                    if (bufferFormats[el].format.compCount == 1)
+                        minBounds[el].y = maxBounds[el].y = minBounds[el].z = maxBounds[el].z = 0.0f;
+                    if (bufferFormats[el].format.compCount == 2)
+                        minBounds[el].z = maxBounds[el].z = 0.0f;
+                }
 
                 while (!finished)
                 {
@@ -1483,7 +1507,7 @@ namespace renderdocui.Windows
                             if (bytes.Length != bytesToRead)
                                 continue;
 
-                            if (elname == "POSITION" || bufferFormats[el].systemValue == SystemAttribute.Position)
+                            // update min/max for this element
                             {
                                 for (int i = 0; i < fmt.compCount; i++)
                                 {
@@ -1510,18 +1534,18 @@ namespace renderdocui.Windows
 
                                     if (i == 0)
                                     {
-                                        minBounds.x = Math.Min(minBounds.x, val);
-                                        maxBounds.x = Math.Max(maxBounds.x, val);
+                                        minBounds[el].x = Math.Min(minBounds[el].x, val);
+                                        maxBounds[el].x = Math.Max(maxBounds[el].x, val);
                                     }
                                     else if (i == 1)
                                     {
-                                        minBounds.y = Math.Min(minBounds.y, val);
-                                        maxBounds.y = Math.Max(maxBounds.y, val);
+                                        minBounds[el].y = Math.Min(minBounds[el].y, val);
+                                        maxBounds[el].y = Math.Max(maxBounds[el].y, val);
                                     }
                                     else if (i == 2)
                                     {
-                                        minBounds.z = Math.Min(minBounds.z, val);
-                                        maxBounds.z = Math.Max(maxBounds.z, val);
+                                        minBounds[el].z = Math.Min(minBounds[el].z, val);
+                                        maxBounds[el].z = Math.Max(maxBounds[el].z, val);
                                     }
                                 }
                             }
@@ -1534,7 +1558,7 @@ namespace renderdocui.Windows
                         }
                     }
 
-                    finished = (elemsWithData > 0);
+                    finished = (elemsWithData == 0);
 
                     rownum++;
                 }
@@ -1543,6 +1567,8 @@ namespace renderdocui.Windows
                 {
                     state.m_MinBounds = minBounds;
                     state.m_MaxBounds = maxBounds;
+
+                    UI_UpdateBoundingBox();
 
                     UI_ShowRows(state, horizScroll);
                 }));
@@ -1900,12 +1926,36 @@ namespace renderdocui.Windows
 
         #region Camera Controls
 
+        private bool RasterizedOutputStage
+        {
+            get
+            {
+                if (m_MeshDisplay.type == MeshDataStage.VSIn)
+                {
+                    return false;
+                }
+                else if (m_MeshDisplay.type == MeshDataStage.VSOut)
+                {
+                    if(m_Core.LogLoaded && m_Core.CurPipelineState.IsTessellationEnabled)
+                        return false;
+
+                    return true;
+                }
+                else if (m_MeshDisplay.type == MeshDataStage.GSOut)
+                {
+                    return true;
+                }
+
+                return false;
+            }
+        }
+
         private void enableCameraControls()
         {
-            if (m_MeshDisplay.type == MeshDataStage.VSIn)
-                aspectGuess.Enabled = nearGuess.Enabled = farGuess.Enabled = false;
-            else
+            if (RasterizedOutputStage)
                 aspectGuess.Enabled = nearGuess.Enabled = farGuess.Enabled = true;
+            else
+                aspectGuess.Enabled = nearGuess.Enabled = farGuess.Enabled = false;
         }
 
         private void configureCam_CheckedChanged(object sender, EventArgs e)
@@ -1917,30 +1967,17 @@ namespace renderdocui.Windows
 
         private void resetCam_Click(object sender, EventArgs e)
         {
-            m_Arcball.Reset(new Vec3f(0.0f, 0.0f, -10.0f));
+            if (RasterizedOutputStage)
+                controlType.SelectedIndex = 1;
+            else
+                controlType.SelectedIndex = 0;
 
-            if (m_MeshDisplay.type == MeshDataStage.VSIn)
-            {
-                m_Flycam.Reset(new Vec3f(0.0f, 0.0f, -10.0f));
-                m_CurrentCamera = m_Arcball;
-            }
-            else if(m_MeshDisplay.type == MeshDataStage.VSOut)
-            {
-                if (m_Core.CurPipelineState.IsTessellationEnabled)
-                    m_Flycam.Reset(new Vec3f(0.0f, 0.0f, -10.0f));
-                else
-                    m_Flycam.Reset(new Vec3f(0.0f, 0.0f, 0.0f));
+            // make sure callback is called even if we're re-selecting same
+            // camera type
+            controlType_SelectedIndexChanged(sender, e);
 
-                m_CurrentCamera = m_Flycam;
-            }
-            else if(m_MeshDisplay.type == MeshDataStage.GSOut)
-            {
-                m_Flycam.Reset(new Vec3f(0.0f, 0.0f, 0.0f));
+            UI_UpdateBoundingBox();
 
-                m_CurrentCamera = m_Flycam;
-            }
-
-            m_CurrentCamera.Apply();
             render.Invalidate();
         }
 
@@ -1953,14 +1990,20 @@ namespace renderdocui.Windows
 
             var state = GetUIState(m_MeshDisplay.type);
 
-            Vec3f diag = state.m_MaxBounds.Sub(state.m_MinBounds);
-
-            if(diag.x < 0.0f || diag.y < 0.0f || diag.z < 0.0f || diag.Length() <= 0.00001f)
+            if (state.m_MinBounds == null || state.m_MaxBounds == null)
                 return;
 
-            Vec3f middle = new Vec3f(state.m_MinBounds.x + diag.x / 2.0f,
-                                     state.m_MinBounds.y + diag.y / 2.0f,
-                                     state.m_MinBounds.z + diag.z / 2.0f);
+            if (CurPosElement < 0 || CurPosElement >= state.m_MinBounds.Length || CurPosElement >= state.m_MaxBounds.Length)
+                return;
+
+            Vec3f diag = state.m_MaxBounds[CurPosElement].Sub(state.m_MinBounds[CurPosElement]);
+
+            if (diag.x < 0.0f || diag.y < 0.0f || diag.z < 0.0f || diag.Length() <= 1e-6f)
+                return;
+
+            Vec3f middle = new Vec3f(state.m_MinBounds[CurPosElement].x + diag.x / 2.0f,
+                                     state.m_MinBounds[CurPosElement].y + diag.y / 2.0f,
+                                     state.m_MinBounds[CurPosElement].z + diag.z / 2.0f);
 
             Vec3f pos = new Vec3f(middle);
 
@@ -1968,9 +2011,8 @@ namespace renderdocui.Windows
 
             m_Flycam.Reset(pos);
 
-            camSpeed.Value = Helpers.Clamp((decimal)(diag.Length() / 200.0f), camSpeed.Minimum, camSpeed.Maximum);
+            UI_UpdateBoundingBox();
 
-            m_CurrentCamera.Apply();
             render.Invalidate();
         }
 
@@ -1978,13 +2020,42 @@ namespace renderdocui.Windows
         {
             if (m_CurrentCamera == null) return;
 
-            m_CurrentCamera.Update();
-
-            if (m_CurrentCamera.Dirty)
-            {
-                m_CurrentCamera.Apply();
+            if (m_CurrentCamera.Update())
                 render.Invalidate();
-            }
+
+            render.Invalidate();
+        }
+
+        private void PickVert(Point p)
+        {
+            if (!m_Core.LogLoaded)
+                return;
+
+            m_Core.Renderer.BeginInvoke((ReplayRenderer r) =>
+            {
+                UInt32 vertSelected = m_Output.PickVertex(m_Core.CurFrame, m_Core.CurEvent, (UInt32)p.X, (UInt32)p.Y);
+
+                if (vertSelected != UInt32.MaxValue)
+                {
+                    this.BeginInvoke(new Action(() =>
+                    {
+                        var ui = GetUIState(m_MeshDisplay.type);
+
+                        int row = (int)vertSelected;
+
+                        if (row >= 0 && row < ui.m_GridView.RowCount)
+                        {
+                            if (ui.m_GridView.SelectedRows.Count == 0 || ui.m_GridView.SelectedRows[0] != ui.m_GridView.Rows[row])
+                            {
+                                ScrollToRow(ui.m_GridView, row);
+
+                                ui.m_GridView.ClearSelection();
+                                ui.m_GridView.Rows[row].Selected = true;
+                            }
+                        }
+                    }));
+                }
+            });
         }
 
         void BufferViewer_KeyUp(object sender, KeyEventArgs e)
@@ -2000,16 +2071,28 @@ namespace renderdocui.Windows
         private void render_MouseWheel(object sender, MouseEventArgs e)
         {
             m_CurrentCamera.MouseWheel(sender, e);
+
+            render.Invalidate();
         }
 
         private void render_MouseMove(object sender, MouseEventArgs e)
         {
             m_CurrentCamera.MouseMove(sender, e);
+
+            render.Invalidate();
+
+            if (e.Button == MouseButtons.Right)
+                PickVert(e.Location);
         }
 
         private void render_MouseClick(object sender, MouseEventArgs e)
         {
             m_CurrentCamera.MouseClick(sender, e);
+
+            render.Invalidate();
+
+            if (e.Button == MouseButtons.Right)
+                PickVert(e.Location);
         }
 
         private void render_MouseDown(object sender, MouseEventArgs e)
@@ -2024,30 +2107,25 @@ namespace renderdocui.Windows
 
         private void controlType_SelectedIndexChanged(object sender, EventArgs e)
         {
+            m_Arcball.Reset(new Vec3f(0.0f, 0.0f, 0.0f), 10.0f);
+            m_Flycam.Reset(new Vec3f(0.0f, 0.0f, 0.0f));
+
             if (controlType.SelectedIndex == 0)
             {
                 m_CurrentCamera = m_Arcball;
-                m_CurrentCamera.Reset(new Vec3f(0.0f, 0.0f, -10.0f));
+                m_Arcball.Reset(new Vec3f(0.0f, 0.0f, 0.0f), 10.0f);
             }
             else
             {
                 m_CurrentCamera = m_Flycam;
-                if (m_MeshDisplay.type == MeshDataStage.VSIn)
-                {
-                    m_CurrentCamera.Reset(new Vec3f(0.0f, 0.0f, -10.0f));
-                }
+                if (RasterizedOutputStage)
+                    m_Flycam.Reset(new Vec3f(0.0f, 0.0f, 0.0f));
                 else
-                {
-                    if (m_Core.CurPipelineState.IsTessellationEnabled)
-                        m_CurrentCamera.Reset(new Vec3f(0.0f, 0.0f, -10.0f));
-                    else
-                        m_CurrentCamera.Reset(new Vec3f(0.0f, 0.0f, 0.0f));
-                }
+                    m_Flycam.Reset(new Vec3f(0.0f, 0.0f, -10.0f));
             }
 
             UpdateHighlightVerts(GetUIState(m_MeshDisplay.type));
 
-            m_CurrentCamera.Apply();
             render.Invalidate();
         }
 
@@ -2059,9 +2137,7 @@ namespace renderdocui.Windows
         {
             if (m_Output == null) return;
 
-            m_MeshDisplay.arcballCamera = m_Camera.IsArcball;
-            m_MeshDisplay.cameraPos = new FloatVector(m_Camera.PositionParam);
-            m_MeshDisplay.cameraRot = new FloatVector(m_Camera.RotationParam);
+            m_MeshDisplay.cam = m_CurrentCamera.Camera.Real;
 
             m_Output.SetMeshDisplay(m_MeshDisplay);
         }
@@ -2121,45 +2197,53 @@ namespace renderdocui.Windows
 
             if (res == DialogResult.OK)
             {
-                StreamWriter writer = File.CreateText(csvSaveDialog.FileName);
-
-                if (MeshView)
+                try
                 {
-                    writer.Write("Vertex,");
-                    writer.Write("Index,");
-                }
-                else
-                {
-                    writer.Write("Row,");
-                }
+                    StreamWriter writer = File.CreateText(csvSaveDialog.FileName);
 
-                UIState ui = m_ContextUIState;
-                for (int i = 0; i < ui.m_Input.BufferFormats.Length; i++)
-                {
-                    for (int j = 0; j < ui.m_Input.BufferFormats[i].format.compCount - 1; j++)
-                        writer.Write(ui.m_Input.BufferFormats[i].name + " " + j + ",");
-                    writer.Write(ui.m_Input.BufferFormats[i].name + " " + (ui.m_Input.BufferFormats[i].format.compCount - 1));
-
-                    if (i < ui.m_Input.BufferFormats.Length - 1)
-                        writer.Write(",");
-                }
-
-                writer.Write(Environment.NewLine);
-
-                foreach (DataGridViewRow row in ui.m_GridView.Rows)
-                {
-                    for (int i = 0; i < row.Cells.Count; i++)
+                    if (MeshView)
                     {
-                        writer.Write(row.Cells[i].Value.ToString());
-                        if (i < row.Cells.Count - 1)
+                        writer.Write("Vertex,");
+                        writer.Write("Index,");
+                    }
+                    else
+                    {
+                        writer.Write("Row,");
+                    }
+
+                    UIState ui = m_ContextUIState;
+                    for (int i = 0; i < ui.m_Input.BufferFormats.Length; i++)
+                    {
+                        for (int j = 0; j < ui.m_Input.BufferFormats[i].format.compCount - 1; j++)
+                            writer.Write(ui.m_Input.BufferFormats[i].name + " " + j + ",");
+                        writer.Write(ui.m_Input.BufferFormats[i].name + " " + (ui.m_Input.BufferFormats[i].format.compCount - 1));
+
+                        if (i < ui.m_Input.BufferFormats.Length - 1)
                             writer.Write(",");
                     }
 
                     writer.Write(Environment.NewLine);
-                }
 
-                writer.Flush();
-                writer.Close();
+                    foreach (DataGridViewRow row in ui.m_GridView.Rows)
+                    {
+                        for (int i = 0; i < row.Cells.Count; i++)
+                        {
+                            writer.Write(row.Cells[i].Value.ToString());
+                            if (i < row.Cells.Count - 1)
+                                writer.Write(",");
+                        }
+
+                        writer.Write(Environment.NewLine);
+                    }
+
+                    writer.Flush();
+                    writer.Close();
+                }
+                catch (System.Exception ex)
+                {
+                    MessageBox.Show("Couldn't save to " + csvSaveDialog.FileName + Environment.NewLine + ex.ToString(), "Cannot save",
+                                                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
             }
         }
 
@@ -2172,13 +2256,21 @@ namespace renderdocui.Windows
 
             if (res == DialogResult.OK)
             {
-                FileStream writer = File.Create(rawSaveDialog.FileName);
+                try
+                {
+                    FileStream writer = File.Create(rawSaveDialog.FileName);
 
-                UIState ui = m_ContextUIState;
-                writer.Write(ui.m_RawData, 0, ui.m_RawData.Length);
+                    UIState ui = m_ContextUIState;
+                    writer.Write(ui.m_RawData, 0, ui.m_RawData.Length);
 
-                writer.Flush();
-                writer.Close();
+                    writer.Flush();
+                    writer.Close();
+                }
+                catch (System.Exception ex)
+                {
+                    MessageBox.Show("Couldn't save to " + csvSaveDialog.FileName + Environment.NewLine + ex.ToString(), "Cannot save",
+                                                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
             }
         }
 
@@ -2195,25 +2287,22 @@ namespace renderdocui.Windows
 
             UI_UpdateMeshRenderComponents();
 
-            if (previewTab.SelectedIndex == 0)
-            {
-                controlType.SelectedIndex = 0;
-            }
-            else if (previewTab.SelectedIndex == 1)
-            {
-                if (m_Core.CurPipelineState.IsTessellationEnabled)
-                    controlType.SelectedIndex = 0;
-                else
-                    controlType.SelectedIndex = 1;
-            }
-            else if (previewTab.SelectedIndex == 2)
+            if (RasterizedOutputStage)
             {
                 controlType.SelectedIndex = 1;
+                fitScreen.Enabled = false;
+            }
+            else
+            {
+                controlType.SelectedIndex = 0;
+                fitScreen.Enabled = true;
             }
 
             enableCameraControls();
 
             controlType_SelectedIndexChanged(sender, e);
+
+            UI_UpdateBoundingBox();
 
             previewTable.Parent = previewTab.SelectedTab;
         }
@@ -2331,6 +2420,44 @@ namespace renderdocui.Windows
             }
         }
 
+        private void UI_UpdateBoundingBox()
+        {
+            var ui = GetUIState(m_MeshDisplay.type);
+
+            m_MeshDisplay.showBBox = false;
+            if (!RasterizedOutputStage &&
+                CurPosElement >= 0 &&
+                ui.m_MinBounds != null && CurPosElement < ui.m_MinBounds.Length &&
+                ui.m_MaxBounds != null && CurPosElement < ui.m_MaxBounds.Length)
+            {
+                m_MeshDisplay.showBBox = true;
+
+                m_MeshDisplay.minBounds = new FloatVector(ui.m_MinBounds[CurPosElement]);
+                m_MeshDisplay.maxBounds = new FloatVector(ui.m_MaxBounds[CurPosElement]);
+
+                Vec3f diag = ui.m_MaxBounds[CurPosElement].Sub(ui.m_MinBounds[CurPosElement]);
+
+                if (diag.x < 0.0f || diag.y < 0.0f || diag.z < 0.0f || diag.Length() <= 1e-6f)
+                    return;
+
+                m_Arcball.LookAtPos = new Vec3f(ui.m_MinBounds[CurPosElement].x + diag.x / 2.0f,
+                                         ui.m_MinBounds[CurPosElement].y + diag.y / 2.0f,
+                                         ui.m_MinBounds[CurPosElement].z + diag.z / 2.0f);
+                m_Arcball.SetDistance(diag.Length()*0.7f);
+
+                try
+                {
+                    camSpeed.Value = Helpers.Clamp((decimal)(diag.Length() / 200.0f), camSpeed.Minimum, camSpeed.Maximum);
+                }
+                catch (OverflowException)
+                {
+                    camSpeed.Value = (decimal)1.0f;
+                }
+
+                render.Invalidate();
+            }
+        }
+
         private void UI_UpdateMeshRenderComponents()
         {
             var ui = GetUIState(m_MeshDisplay.type);
@@ -2414,7 +2541,7 @@ namespace renderdocui.Windows
                     m_MeshDisplay.position.numVerts = ui.m_Data.PostVS.numVerts;
                 }
 
-                if ((ui.m_Input.Drawcall.flags & DrawcallFlags.UseIBuffer) == 0)
+                if ((ui.m_Input.Drawcall.flags & DrawcallFlags.UseIBuffer) == 0 || ui.m_Stage == MeshDataStage.GSOut)
                 {
                     m_MeshDisplay.position.idxbuf = ResourceId.Null;
                     m_MeshDisplay.position.idxoffs = 0;
@@ -2428,11 +2555,13 @@ namespace renderdocui.Windows
                 m_MeshDisplay.position.unproject = false;
                 // near and far plane handled elsewhere
 
-                if ((ui.m_Stage == MeshDataStage.VSOut && !m_Core.CurPipelineState.IsTessellationEnabled) || ui.m_Stage == MeshDataStage.GSOut)
+                if (RasterizedOutputStage)
                 {
                     m_MeshDisplay.position.unproject = pos.systemValue == SystemAttribute.Position;
                 }
             }
+
+            UI_UpdateBoundingBox();
 
             if (ui.m_Input == null || ui.m_Input.BufferFormats == null ||
                 CurSecondElement == -1 || CurSecondElement >= ui.m_Input.BufferFormats.Length)
@@ -2840,7 +2969,12 @@ namespace renderdocui.Windows
 
             if (row >= ui.m_Rows.Length || ui.m_Rows[row].Length <= 1) return;
 
-            UInt32 idx = (UInt32)ui.m_Rows[row][1];
+            UInt32 idx = 0;
+
+            if (ui.m_Rows[row][1] is UInt32)
+            {
+                idx = (UInt32)ui.m_Rows[row][1];
+            }
 
             var draw = m_Core.CurDrawcall;
 

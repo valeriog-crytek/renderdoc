@@ -222,8 +222,17 @@ namespace renderdocui.Windows.PipelineState
                 shader.Text = stage.ShaderName;
 
             if (shaderDetails != null && shaderDetails.DebugInfo.entryFunc.Length > 0 && shaderDetails.DebugInfo.files.Length > 0)
-                shader.Text = shaderDetails.DebugInfo.entryFunc + "()" + " - " + 
-                                Path.GetFileName(shaderDetails.DebugInfo.files[0].filename);
+            {
+                string shaderfn = "";
+
+                int entryFile = shaderDetails.DebugInfo.entryFile;
+                if (entryFile < 0 || entryFile >= shaderDetails.DebugInfo.files.Length)
+                    entryFile = 0;
+
+                shaderfn = shaderDetails.DebugInfo.files[entryFile].BaseFilename;
+
+                shader.Text = shaderDetails.DebugInfo.entryFunc + "()" + " - " + shaderfn;
+            }
 
             int vs = 0;
             
@@ -242,7 +251,10 @@ namespace renderdocui.Windows.PipelineState
                         foreach (var bind in shaderDetails.Resources)
                         {
                             if (bind.IsSRV && bind.bindPoint == i)
+                            {
                                 shaderInput = bind;
+                                break;
+                            }
                         }
                     }
 
@@ -363,7 +375,10 @@ namespace renderdocui.Windows.PipelineState
                         foreach (var bind in shaderDetails.Resources)
                         {
                             if (bind.IsSampler && bind.bindPoint == i)
+                            {
                                 shaderInput = bind;
+                                break;
+                            }
                         }
                     }
 
@@ -678,6 +693,26 @@ namespace renderdocui.Windows.PipelineState
 
                     layoutOffs[l.InputSlot] += l.Format.compByteWidth * l.Format.compCount;
 
+                    bool iaUsed = false;
+
+                    if (state.m_IA.Bytecode != null)
+                    {
+                        for (int ia = 0; ia < state.m_IA.Bytecode.InputSig.Length; ia++)
+                        {
+                            if (state.m_IA.Bytecode.InputSig[ia].semanticName.ToUpperInvariant() == l.SemanticName.ToUpperInvariant() &&
+                                state.m_IA.Bytecode.InputSig[ia].semanticIndex == l.SemanticIndex)
+                            {
+                                iaUsed = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    i++;
+
+                    if(!iaUsed && !showDisabled.Checked)
+                        continue;
+
                     var node = inputLayouts.Nodes.Add(new object[] {
                                               i, l.SemanticName, l.SemanticIndex.ToString(), l.Format, l.InputSlot.ToString(), byteOffs,
                                               l.PerInstance ? "PER_INSTANCE" : "PER_VERTEX", l.InstanceDataStepRate.ToString() });
@@ -687,7 +722,8 @@ namespace renderdocui.Windows.PipelineState
                     node.Image = global::renderdocui.Properties.Resources.action;
                     node.HoverImage = global::renderdocui.Properties.Resources.action_hover;
 
-                    i++;
+                    if (!iaUsed)
+                        InactiveRow(node);
                 }
             }
             inputLayouts.NodesSelection.Clear();
@@ -874,7 +910,10 @@ namespace renderdocui.Windows.PipelineState
                         foreach (var bind in state.m_CS.ShaderDetails.Resources)
                         {
                             if (bind.IsReadWrite && bind.bindPoint == i)
+                            {
                                 shaderInput = bind;
+                                break;
+                            }
                         }
                     }
 
@@ -1188,7 +1227,10 @@ namespace renderdocui.Windows.PipelineState
                         foreach (var bind in state.m_PS.ShaderDetails.Resources)
                         {
                             if (bind.IsReadWrite && bind.bindPoint == i + state.m_OM.UAVStartSlot)
+                            {
                                 shaderInput = bind;
+                                break;
+                            }
                         }
                     }
 
@@ -1624,6 +1666,8 @@ namespace renderdocui.Windows.PipelineState
 
         private void defaultCopyPaste_KeyDown(object sender, KeyEventArgs e)
         {
+            if (!m_Core.LogLoaded) return;
+
             if (e.KeyCode == Keys.C && e.Control)
             {
                 string text = "";
@@ -1659,8 +1703,23 @@ namespace renderdocui.Windows.PipelineState
                     }
                 }
 
-                if(text.Length > 0)
-                    Clipboard.SetText(text);
+                try
+                {
+                    if (text.Length > 0)
+                        Clipboard.SetText(text);
+                }
+                catch (System.Exception)
+                {
+                    try
+                    {
+                        if (text.Length > 0)
+                            Clipboard.SetDataObject(text);
+                    }
+                    catch (System.Exception)
+                    {
+                        // give up!
+                    }
+                }
             }
         }
 
@@ -1824,15 +1883,19 @@ namespace renderdocui.Windows.PipelineState
 
             string mainfile = "";
 
-            var files = new Dictionary<string, string>();
+            var files = new Dictionary<string, string>(StringComparer.InvariantCultureIgnoreCase);
             if (shaderDetails.DebugInfo.entryFunc.Length > 0 && shaderDetails.DebugInfo.files.Length > 0)
             {
                 entryFunc = shaderDetails.DebugInfo.entryFunc;
 
                 foreach (var s in shaderDetails.DebugInfo.files)
-                    files.Add(Path.GetFileName(s.filename), s.filetext);
+                    files.Add(s.BaseFilename, s.filetext);
 
-                mainfile = Path.GetFileName(shaderDetails.DebugInfo.files[0].filename);
+                int entryFile = shaderDetails.DebugInfo.entryFile;
+                if (entryFile < 0 || entryFile >= shaderDetails.DebugInfo.files.Length)
+                    entryFile = 0;
+
+                mainfile = shaderDetails.DebugInfo.files[entryFile].BaseFilename;
             }
             else
             {
@@ -1917,7 +1980,7 @@ namespace renderdocui.Windows.PipelineState
             // Save Callback
             (ShaderViewer viewer, Dictionary<string, string> updatedfiles) =>
             {
-                string compileSource = updatedfiles.First().Value;
+                string compileSource = updatedfiles[mainfile];
 
                 // try and match up #includes against the files that we have. This isn't always
                 // possible as fxc only seems to include the source for files if something in
@@ -2201,6 +2264,31 @@ namespace renderdocui.Windows.PipelineState
                 uint.TryParse(threadY.Text, out ty) &&
                 uint.TryParse(threadZ.Text, out tz))
             {
+                uint[] groupdim = m_Core.CurDrawcall.dispatchDimension;
+                uint[] threadsdim = m_Core.CurDrawcall.dispatchThreadsDimension;
+
+                for (int i = 0; i < 3; i++)
+                    if (threadsdim[i] == 0)
+                        threadsdim[i] = m_Core.CurD3D11PipelineState.m_CS.ShaderDetails.DispatchThreadsDimension[i];
+
+                string debugContext = String.Format("Group [{0},{1},{2}] Thread [{3},{4},{5}]", gx, gy, gz, tx, ty, tz);
+
+                if (gx >= groupdim[0] ||
+                    gy >= groupdim[1] ||
+                    gz >= groupdim[2] ||
+                    tx >= threadsdim[0] ||
+                    ty >= threadsdim[1] ||
+                    tz >= threadsdim[2])
+                {
+                    string bounds = String.Format("Group Dimensions [{0},{1},{2}] Thread Dimensions [{3},{4},{5}]",
+                        groupdim[0], groupdim[1], groupdim[2],
+                        threadsdim[0], threadsdim[1], threadsdim[2]);
+
+                    MessageBox.Show(String.Format("{0} is out of bounds\n{1}", debugContext, bounds), "Couldn't debug compute shader.",
+                                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
                 ShaderDebugTrace trace = null;
 
                 ShaderReflection shaderDetails = m_Core.CurD3D11PipelineState.m_CS.ShaderDetails;
@@ -2219,8 +2307,6 @@ namespace renderdocui.Windows.PipelineState
 
                 this.BeginInvoke(new Action(() =>
                 {
-                    string debugContext = String.Format("Group [{0},{1},{2}] Thread [{3},{4},{5}]", gx, gy, gz, tx, ty, tz);
-
                     ShaderViewer s = new ShaderViewer(m_Core, shaderDetails, ShaderStageType.Compute, trace, debugContext);
 
                     s.Show(m_DockContent.DockPanel);
@@ -2405,7 +2491,10 @@ namespace renderdocui.Windows.PipelineState
                 foreach (var bind in refl.Resources)
                 {
                     if (bind.IsReadWrite && bind.bindPoint == i)
+                    {
                         shaderInput = bind;
+                        break;
+                    }
                 }
             }
 
@@ -2627,7 +2716,7 @@ namespace renderdocui.Windows.PipelineState
 
                 if (shaderDetails != null && shaderDetails.DebugInfo.entryFunc.Length > 0 && shaderDetails.DebugInfo.files.Length > 0)
                     shadername = shaderDetails.DebugInfo.entryFunc + "()" + " - " +
-                                    Path.GetFileName(shaderDetails.DebugInfo.files[0].filename);
+                                    shaderDetails.DebugInfo.files[0].BaseFilename;
 
                 writer.WriteStartElement("p");
                 writer.WriteString(shadername);

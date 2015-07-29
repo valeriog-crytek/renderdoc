@@ -127,8 +127,9 @@ struct GLPipelineState
 	struct Sampler
 	{
 		Sampler()
-			: Samp(), MaxAniso(0.0f), MaxLOD(0.0f), MinLOD(0.0f), MipLODBias(0.0f)
+			: Samp()
 			, UseBorder(false), UseComparison(false), SeamlessCube(false)
+			, MaxAniso(0.0f), MaxLOD(0.0f), MinLOD(0.0f), MipLODBias(0.0f)
 		{ BorderColor[0] = BorderColor[1] = BorderColor[2] = BorderColor[3] = 0.0f; }
 		ResourceId Samp;
 		rdctype::str AddressS, AddressT, AddressR;
@@ -276,13 +277,20 @@ struct GLPipelineState
 		bool32 FramebufferSRGB;
 		bool32 Dither;
 
+		struct Attachment
+		{
+			ResourceId Obj;
+			uint32_t Layer;
+			uint32_t Mip;
+		};
+
 		struct FBO
 		{
 			FBO() : Obj(), Depth(), Stencil() {}
 			ResourceId Obj;
-			rdctype::array<ResourceId> Color;
-			ResourceId Depth;
-			ResourceId Stencil;
+			rdctype::array<Attachment> Color;
+			Attachment Depth;
+			Attachment Stencil;
 
 			rdctype::array<int32_t> DrawBuffers;
 			int32_t ReadBuffer;

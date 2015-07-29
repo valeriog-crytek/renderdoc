@@ -749,7 +749,18 @@ void MakeShaderReflection(const GLHookSet &gl, GLenum shadType, GLuint sepProg, 
 	refl.DebugInfo.entryFunc = "main";
 	refl.DebugInfo.compileFlags = 0;
 
+	refl.DebugInfo.entryFile = 0;
+
 	refl.Disassembly = "";
+
+	if(shadType == eGL_COMPUTE_SHADER)
+	{
+		gl.glGetProgramiv(sepProg, eGL_COMPUTE_WORK_GROUP_SIZE, (GLint *)refl.DispatchThreadsDimension);
+	}
+	else
+	{
+		RDCEraseEl(refl.DispatchThreadsDimension);
+	}
 
 	vector<ShaderResource> resources;
 

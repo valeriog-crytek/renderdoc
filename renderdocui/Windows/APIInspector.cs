@@ -265,6 +265,8 @@ namespace renderdocui.Windows
 
         private void apiEvents_KeyDown(object sender, KeyEventArgs e)
         {
+            if (!m_Core.LogLoaded) return;
+
             if (e.KeyCode == Keys.C && e.Control)
             {
                 string text = "";
@@ -273,12 +275,30 @@ namespace renderdocui.Windows
                     text += string.Format("{0,-5}  {1}" + Environment.NewLine, n[0].ToString(), n[1].ToString());
                 }
 
-                Clipboard.SetText(text);
+                try
+                {
+                    if (text.Length > 0)
+                        Clipboard.SetText(text);
+                }
+                catch (System.Exception)
+                {
+                    try
+                    {
+                        if (text.Length > 0)
+                            Clipboard.SetDataObject(text);
+                    }
+                    catch (System.Exception)
+                    {
+                        // give up!
+                    }
+                }
             }
         }
 
         private void callstack_KeyDown(object sender, KeyEventArgs e)
         {
+            if (!m_Core.LogLoaded) return;
+
             if (e.KeyCode == Keys.C && e.Control)
             {
                 string text = "";
@@ -287,7 +307,23 @@ namespace renderdocui.Windows
                     text += n.ToString() + Environment.NewLine;
                 }
 
-                Clipboard.SetText(text);
+                try
+                {
+                    if (text.Length > 0)
+                        Clipboard.SetText(text);
+                }
+                catch (System.Exception)
+                {
+                    try
+                    {
+                        if (text.Length > 0)
+                            Clipboard.SetDataObject(text);
+                    }
+                    catch (System.Exception)
+                    {
+                        // give up!
+                    }
+                }
             }
         }
 

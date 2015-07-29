@@ -564,6 +564,11 @@ void WrappedID3D11DeviceContext::EndFrame()
 	m_pDevice->GetResourceManager()->FlushPendingDirty();
 }
 
+bool WrappedID3D11DeviceContext::IsFL11_1()
+{
+	return m_pDevice->GetFeatureLevel() >= D3D_FEATURE_LEVEL_11_1;
+}
+
 void WrappedID3D11DeviceContext::ProcessChunk(uint64_t offset, D3D11ChunkType chunk, bool forceExecute)
 {
 	if(chunk < FIRST_CONTEXT_CHUNK && !forceExecute)
@@ -989,9 +994,9 @@ void WrappedID3D11DeviceContext::AddUsage(FetchDrawcall d)
 	
 		if(s == 5)
 		{
-			for(int i=0; i < D3D11_PS_CS_UAV_REGISTER_COUNT; i++)
-				if(pipe->CS.Used_UAV(i) && pipe->CS.UAVs[i])
-					m_ResourceUses[((WrappedID3D11UnorderedAccessView *)pipe->CS.UAVs[i])->GetResourceResID()].push_back(EventUsage(e, eUsage_CS_RWResource));
+			for(int i=0; i < D3D11_1_UAV_SLOT_COUNT; i++)
+				if(pipe->CS.Used_UAV(i) && pipe->CSUAVs[i])
+					m_ResourceUses[((WrappedID3D11UnorderedAccessView *)pipe->CSUAVs[i])->GetResourceResID()].push_back(EventUsage(e, eUsage_CS_RWResource));
 		}
 	}
 	
@@ -1005,7 +1010,7 @@ void WrappedID3D11DeviceContext::AddUsage(FetchDrawcall d)
 	//////////////////////////////
 	// OM
 
-	for(int i=0; i < D3D11_PS_CS_UAV_REGISTER_COUNT; i++)
+	for(int i=0; i < D3D11_1_UAV_SLOT_COUNT; i++)
 		if(pipe->PS.Used_UAV(i) && pipe->OM.UAVs[i])
 			m_ResourceUses[((WrappedID3D11UnorderedAccessView *)pipe->OM.UAVs[i])->GetResourceResID()].push_back(EventUsage(e, eUsage_PS_RWResource));
 	
@@ -1212,6 +1217,8 @@ void WrappedID3D11DeviceContext::ReplayLog(LogState readType, uint32_t startEven
 
 	m_pDevice->GetResourceManager()->MarkInFrame(true);
 
+	uint64_t startOffset = m_pSerialiser->GetOffset();
+
 	while(1)
 	{
 		if(m_State == EXECUTING && m_CurEventID > endEventID)
@@ -1226,7 +1233,7 @@ void WrappedID3D11DeviceContext::ReplayLog(LogState readType, uint32_t startEven
 
 		ProcessChunk(offset, chunktype, false);
 		
-		RenderDoc::Inst().SetProgress(FileInitialRead, float(offset)/float(m_pSerialiser->GetSize()));
+		RenderDoc::Inst().SetProgress(FrameEventsRead, float(offset - startOffset)/float(m_pSerialiser->GetSize()));
 		
 		// for now just abort after capture scope. Really we'd need to support multiple frames
 		// but for now this will do.

@@ -25,6 +25,70 @@
 #include "gl_hookset.h"
 #include "gl_resources.h"
 
+size_t GetCompressedByteSize(GLsizei w, GLsizei h, GLsizei d, GLenum internalformat, int mip)
+{
+	if(!IsCompressedFormat(internalformat))
+	{
+		RDCERR("Not compressed format");
+		return GetByteSize(w, h, d, GetBaseFormat(internalformat), GetDataType(internalformat));
+	}
+
+	switch(internalformat)
+	{
+		// BC1
+		case eGL_COMPRESSED_RGB_S3TC_DXT1_EXT:
+		case eGL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
+		case eGL_COMPRESSED_SRGB_S3TC_DXT1_EXT:
+		case eGL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT:
+			return (AlignUp4(w) * AlignUp4(h) * d) / 2;
+		// BC2
+		case eGL_COMPRESSED_RGBA_S3TC_DXT3_EXT:
+		case eGL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT:
+			return (AlignUp4(w) * AlignUp4(h) * d);
+		// BC3
+		case eGL_COMPRESSED_RGBA_S3TC_DXT5_EXT:
+		case eGL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT:
+			return (AlignUp4(w) * AlignUp4(h) * d);
+		// BC4
+		case eGL_COMPRESSED_RED_RGTC1:
+		case eGL_COMPRESSED_SIGNED_RED_RGTC1:
+			return (AlignUp4(w) * AlignUp4(h) * d) / 2;
+		// BC5
+		case eGL_COMPRESSED_RG_RGTC2:
+		case eGL_COMPRESSED_SIGNED_RG_RGTC2:
+			return (AlignUp4(w) * AlignUp4(h) * d);
+		// BC6
+		case eGL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT_ARB:
+		case eGL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT_ARB:
+			return (AlignUp4(w) * AlignUp4(h) * d);
+		// BC7
+		case eGL_COMPRESSED_RGBA_BPTC_UNORM_ARB:
+		case eGL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM_ARB:
+			return (AlignUp4(w) * AlignUp4(h) * d);
+		// ETC2
+		case eGL_COMPRESSED_RGB8_ETC2:
+		case eGL_COMPRESSED_SRGB8_ETC2:
+		case eGL_COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2:
+		case eGL_COMPRESSED_SRGB8_PUNCHTHROUGH_ALPHA1_ETC2:
+			return (AlignUp4(w) * AlignUp4(h) * d) / 2;
+		// EAC
+		case eGL_COMPRESSED_RGBA8_ETC2_EAC:
+		case eGL_COMPRESSED_SRGB8_ALPHA8_ETC2_EAC:
+			return (AlignUp4(w) * AlignUp4(h) * d);
+		case eGL_COMPRESSED_R11_EAC:
+		case eGL_COMPRESSED_SIGNED_R11_EAC:
+			return (AlignUp4(w) * AlignUp4(h) * d) / 2;
+		case eGL_COMPRESSED_RG11_EAC:
+		case eGL_COMPRESSED_SIGNED_RG11_EAC:
+			return (AlignUp4(w) * AlignUp4(h) * d);
+		default:
+			break;
+	}
+
+	RDCERR("Unrecognised compressed format");
+	return GetByteSize(w, h, d, GetBaseFormat(internalformat), GetDataType(internalformat));
+}
+
 size_t GetByteSize(GLsizei w, GLsizei h, GLsizei d, GLenum format, GLenum type)
 {
 	size_t elemSize = 0;
@@ -122,7 +186,7 @@ size_t GetByteSize(GLsizei w, GLsizei h, GLsizei d, GLenum format, GLenum type)
 
 GLenum GetBaseFormat(GLenum internalFormat)
 {
-	switch(internalFormat)
+	switch((int)internalFormat)
 	{
 		case eGL_R8:
 		case eGL_R8_SNORM:
@@ -133,6 +197,12 @@ GLenum GetBaseFormat(GLenum internalFormat)
 			return eGL_RED;
 		case eGL_ALPHA8_EXT:
 			return eGL_ALPHA;
+		case eGL_LUMINANCE:
+			return eGL_LUMINANCE;
+		case eGL_LUMINANCE_ALPHA:
+			return eGL_LUMINANCE_ALPHA;
+		case eGL_INTENSITY:
+			return eGL_INTENSITY;
 		case eGL_R8I:
 		case eGL_R16I:
 		case eGL_R32I:
@@ -222,7 +292,7 @@ GLenum GetBaseFormat(GLenum internalFormat)
 
 GLenum GetDataType(GLenum internalFormat)
 {
-	switch(internalFormat)
+	switch((int)internalFormat)
 	{
 		case eGL_RGBA8UI:
 		case eGL_RG8UI:
@@ -313,6 +383,9 @@ GLenum GetDataType(GLenum internalFormat)
 		case eGL_STENCIL_INDEX8:
 			return eGL_UNSIGNED_BYTE;
 		case eGL_ALPHA8_EXT:
+		case eGL_LUMINANCE_ALPHA:
+		case eGL_LUMINANCE:
+		case eGL_INTENSITY:
 			return eGL_UNSIGNED_BYTE;
 		default:
 			break;
@@ -365,6 +438,26 @@ GLenum GetSizedFormat(const GLHookSet &gl, GLenum target, GLenum internalFormat)
 {
 	switch(internalFormat)
 	{
+		// pick sized format ourselves for generic formats
+		case eGL_COMPRESSED_RED:
+			return eGL_COMPRESSED_RED_RGTC1;
+		case eGL_COMPRESSED_RG:
+			return eGL_COMPRESSED_RG_RGTC2;
+		case eGL_COMPRESSED_RGB:
+			return eGL_COMPRESSED_RGB_S3TC_DXT1_EXT;
+		case eGL_COMPRESSED_RGBA:
+			return eGL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+		case eGL_COMPRESSED_SRGB:
+			return eGL_COMPRESSED_SRGB_S3TC_DXT1_EXT;
+		case eGL_COMPRESSED_SRGB_ALPHA:
+			return eGL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT;
+
+		// only one sized format for SRGB
+		case eGL_SRGB:
+			return eGL_SRGB8;
+		case eGL_SRGB_ALPHA:
+			return eGL_SRGB8_ALPHA8;
+
 		case eGL_RED:
 		case eGL_RG:
 		case eGL_RGB:
@@ -390,8 +483,17 @@ GLenum GetSizedFormat(const GLHookSet &gl, GLenum target, GLenum internalFormat)
 	}
 	
 	GLint red, depth;
-	gl.glGetInternalformativ(target, internalFormat, eGL_INTERNALFORMAT_RED_SIZE, sizeof(GLint), &red);
-	gl.glGetInternalformativ(target, internalFormat, eGL_INTERNALFORMAT_DEPTH_SIZE, sizeof(GLint), &depth);
+	if(gl.glGetInternalformativ)
+	{
+		gl.glGetInternalformativ(target, internalFormat, eGL_INTERNALFORMAT_RED_SIZE, sizeof(GLint), &red);
+		gl.glGetInternalformativ(target, internalFormat, eGL_INTERNALFORMAT_DEPTH_SIZE, sizeof(GLint), &depth);
+	}
+	else
+	{
+		// without the query function, just default to sensible defaults
+		red = 8;
+		depth = 32;
+	}
 
 	switch(internalFormat)
 	{
@@ -442,7 +544,7 @@ GLenum GetSizedFormat(const GLHookSet &gl, GLenum target, GLenum internalFormat)
 	return internalFormat;
 }
 
-void EmulateLuminanceFormat(const GLHookSet &gl, GLuint tex, GLenum target, GLenum &internalFormat, GLenum &dataFormat)
+bool EmulateLuminanceFormat(const GLHookSet &gl, GLuint tex, GLenum target, GLenum &internalFormat, GLenum &dataFormat)
 {
 	GLenum swizzle[] = { eGL_RED, eGL_GREEN, eGL_BLUE, eGL_ALPHA };
 
@@ -525,11 +627,13 @@ void EmulateLuminanceFormat(const GLHookSet &gl, GLuint tex, GLenum target, GLen
 			swizzle[3] = eGL_GREEN;
 			break;
 		default:
-			return;
+			return false;
 	}
 
 	if(tex)
 		gl.glTextureParameterivEXT(tex, target, eGL_TEXTURE_SWIZZLE_RGBA, (GLint *)swizzle);
+
+	return true;
 }
 
 bool IsCompressedFormat(GLenum internalFormat)

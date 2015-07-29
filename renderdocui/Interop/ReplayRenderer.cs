@@ -102,6 +102,8 @@ namespace renderdoc
         [DllImport("renderdoc.dll", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
         private static extern bool ReplayOutput_PickPixel(IntPtr real, ResourceId texID, bool customShader,
                                                                 UInt32 x, UInt32 y, UInt32 sliceFace, UInt32 mip, UInt32 sample, IntPtr outval);
+        [DllImport("renderdoc.dll", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
+        private static extern UInt32 ReplayOutput_PickVertex(IntPtr real, UInt32 frameID, UInt32 eventID, UInt32 x, UInt32 y);
 
         private IntPtr m_Real = IntPtr.Zero;
 
@@ -163,6 +165,11 @@ namespace renderdoc
             return ret;
         }
 
+        public UInt32 PickVertex(UInt32 frameID, UInt32 eventID, UInt32 x, UInt32 y)
+        {
+            return ReplayOutput_PickVertex(m_Real, frameID, eventID,  x, y);
+        }
+
     };
 
     public class ReplayRenderer
@@ -179,6 +186,9 @@ namespace renderdoc
         private static extern void ReplayRenderer_ShutdownOutput(IntPtr real, IntPtr replayOutput);
 
         [DllImport("renderdoc.dll", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
+        private static extern void ReplayRenderer_FileChanged(IntPtr real);
+
+        [DllImport("renderdoc.dll", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
         private static extern bool ReplayRenderer_HasCallstacks(IntPtr real);
         [DllImport("renderdoc.dll", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
         private static extern bool ReplayRenderer_InitResolver(IntPtr real);
@@ -193,12 +203,12 @@ namespace renderdoc
         private static extern bool ReplayRenderer_GetGLPipelineState(IntPtr real, IntPtr mem);
 
         [DllImport("renderdoc.dll", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
-        private static extern bool ReplayRenderer_BuildCustomShader(IntPtr real, IntPtr entry, IntPtr source, UInt32 compileFlags, ShaderStageType type, ref ResourceId shaderID, IntPtr errorMem);
+        private static extern void ReplayRenderer_BuildCustomShader(IntPtr real, IntPtr entry, IntPtr source, UInt32 compileFlags, ShaderStageType type, ref ResourceId shaderID, IntPtr errorMem);
         [DllImport("renderdoc.dll", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
         private static extern bool ReplayRenderer_FreeCustomShader(IntPtr real, ResourceId id);
 
         [DllImport("renderdoc.dll", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
-        private static extern bool ReplayRenderer_BuildTargetShader(IntPtr real, IntPtr entry, IntPtr source, UInt32 compileFlags, ShaderStageType type, ref ResourceId shaderID, IntPtr errorMem);
+        private static extern void ReplayRenderer_BuildTargetShader(IntPtr real, IntPtr entry, IntPtr source, UInt32 compileFlags, ShaderStageType type, ref ResourceId shaderID, IntPtr errorMem);
         [DllImport("renderdoc.dll", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
         private static extern bool ReplayRenderer_ReplaceResource(IntPtr real, ResourceId from, ResourceId to);
         [DllImport("renderdoc.dll", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
@@ -228,7 +238,7 @@ namespace renderdoc
         private static extern bool ReplayRenderer_GetDebugMessages(IntPtr real, IntPtr outmsgs);
         
         [DllImport("renderdoc.dll", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
-        private static extern bool ReplayRenderer_PixelHistory(IntPtr real, ResourceId target, UInt32 x, UInt32 y, UInt32 sampleIdx, IntPtr history);
+        private static extern bool ReplayRenderer_PixelHistory(IntPtr real, ResourceId target, UInt32 x, UInt32 y, UInt32 slice, UInt32 mip, UInt32 sampleIdx, IntPtr history);
         [DllImport("renderdoc.dll", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
         private static extern bool ReplayRenderer_DebugVertex(IntPtr real, UInt32 vertid, UInt32 instid, UInt32 idx, UInt32 instOffset, UInt32 vertOffset, IntPtr outtrace);
         [DllImport("renderdoc.dll", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
@@ -294,6 +304,9 @@ namespace renderdoc
             return new ReplayOutput(ret);
         }
 
+        public void FileChanged()
+        { ReplayRenderer_FileChanged(m_Real); }
+
         public bool HasCallstacks()
         { return ReplayRenderer_HasCallstacks(m_Real); }
 
@@ -346,13 +359,10 @@ namespace renderdoc
             IntPtr entry_mem = CustomMarshal.MakeUTF8String(entry);
             IntPtr source_mem = CustomMarshal.MakeUTF8String(source);
 
-            bool success = ReplayRenderer_BuildCustomShader(m_Real, entry_mem, source_mem, compileFlags, type, ref ret, mem);
+            ReplayRenderer_BuildCustomShader(m_Real, entry_mem, source_mem, compileFlags, type, ref ret, mem);
 
             CustomMarshal.Free(entry_mem);
             CustomMarshal.Free(source_mem);
-
-            if (!success)
-                ret = ResourceId.Null;
 
             errors = CustomMarshal.TemplatedArrayToString(mem, true);
 
@@ -373,13 +383,10 @@ namespace renderdoc
             IntPtr entry_mem = CustomMarshal.MakeUTF8String(entry);
             IntPtr source_mem = CustomMarshal.MakeUTF8String(source);
 
-            bool success = ReplayRenderer_BuildTargetShader(m_Real, entry_mem, source_mem, compileFlags, type, ref ret, mem);
+            ReplayRenderer_BuildTargetShader(m_Real, entry_mem, source_mem, compileFlags, type, ref ret, mem);
 
             CustomMarshal.Free(entry_mem);
             CustomMarshal.Free(source_mem);
-
-            if (!success)
-                ret = ResourceId.Null;
 
             errors = CustomMarshal.TemplatedArrayToString(mem, true);
 
@@ -610,11 +617,11 @@ namespace renderdoc
             return ret;
         }
 
-        public PixelModification[] PixelHistory(ResourceId target, UInt32 x, UInt32 y, UInt32 sampleIdx)
+        public PixelModification[] PixelHistory(ResourceId target, UInt32 x, UInt32 y, UInt32 slice, UInt32 mip, UInt32 sampleIdx)
         {
             IntPtr mem = CustomMarshal.Alloc(typeof(templated_array));
 
-            bool success = ReplayRenderer_PixelHistory(m_Real, target, x, y, sampleIdx, mem);
+            bool success = ReplayRenderer_PixelHistory(m_Real, target, x, y, slice, mip, sampleIdx, mem);
 
             PixelModification[] ret = null;
 

@@ -44,6 +44,12 @@ bool WrappedID3D11Device::Serialise_CreateBuffer(
 		pInitialData = &fakeData;
 	}
 
+	// this is a bit of a hack, but to maintain backwards compatibility we have a
+	// separate function here that aligns the next serialised buffer to a 32-byte
+	// boundary in memory while writing (just skips the padding on read).
+	if(m_State >= WRITING || GetLogVersion() >= 0x000007)
+		m_pSerialiser->AlignNextBuffer(32);
+
 	SERIALISE_ELEMENT_BUF(byte *, InitialData, pInitialData->pSysMem, Descriptor.ByteWidth);
 
 	uint64_t offs = m_pSerialiser->GetOffset()-Descriptor.ByteWidth;
@@ -227,7 +233,10 @@ vector<D3D11_SUBRESOURCE_DATA> WrappedID3D11Device::Serialise_CreateTextureData(
 				record->NumSubResources = numSubresources;
 				record->SubResources = new ResourceRecord*[record->NumSubResources];
 				for(UINT s=0; s < numSubresources; s++)
+				{
 					record->SubResources[s] = new D3D11ResourceRecord(ResourceId());
+					record->SubResources[s]->DataInSerialiser = HasData;
+				}
 			}
 
 			RDCASSERT(record != NULL);
@@ -260,6 +269,12 @@ vector<D3D11_SUBRESOURCE_DATA> WrappedID3D11Device::Serialise_CreateTextureData(
 
 			intercept.CopyFromD3D();
 		}
+
+		// this is a bit of a hack, but to maintain backwards compatibility we have a
+		// separate function here that aligns the next serialised buffer to a 32-byte
+		// boundary in memory while writing (just skips the padding on read).
+		if(m_State >= WRITING || GetLogVersion() >= 0x000007)
+			m_pSerialiser->AlignNextBuffer(32);
 
 		SERIALISE_ELEMENT_BUF(byte *, buf, scratch, subresourceSize);
 
@@ -385,6 +400,8 @@ HRESULT WrappedID3D11Device::CreateTexture1D(
 				SCOPED_SERIALISE_CONTEXT(CREATE_TEXTURE_1D);
 				Serialise_CreateTexture1D(pDesc, pInitialData, &wrapped);
 
+				scope.SetAlignment(32);
+
 				chunk = scope.Get();
 			}
 
@@ -485,6 +502,8 @@ HRESULT WrappedID3D11Device::CreateTexture2D(
 			{
 				SCOPED_SERIALISE_CONTEXT(CREATE_TEXTURE_2D);
 				Serialise_CreateTexture2D(pDesc, pInitialData, &wrapped);
+
+				scope.SetAlignment(32);
 
 				chunk = scope.Get();
 			}
@@ -587,6 +606,8 @@ HRESULT WrappedID3D11Device::CreateTexture3D(
 				SCOPED_SERIALISE_CONTEXT(CREATE_TEXTURE_3D);
 				Serialise_CreateTexture3D(pDesc, pInitialData, &wrapped);
 
+				scope.SetAlignment(32);
+
 				chunk = scope.Get();
 			}
 
@@ -673,16 +694,6 @@ bool WrappedID3D11Device::Serialise_CreateShaderResourceView(
 			GetResourceManager()->AddLiveResource(pView, ret);
 		}
 	}
-	else if(m_State >= WRITING)
-	{
-		D3D11ResourceRecord *record = GetResourceManager()->GetResourceRecord(Resource);
-
-		((WrappedID3D11ShaderResourceView *)*ppSRView)->SetResourceRecord(record);
-
-		RDCASSERT(record);
-
-		record->AddRef();
-	}
 
 	return true;
 }
@@ -719,8 +730,19 @@ HRESULT WrappedID3D11Device::CreateShaderResourceView(
 				WrappedID3D11Texture3D::IsAlloc(pResource) ||
 				WrappedID3D11Buffer::IsAlloc(pResource))
 			{
-				D3D11ResourceRecord *record = GetResourceManager()->GetResourceRecord(GetIDForResource(pResource));
-				RDCASSERT(record);
+				D3D11ResourceRecord *parent = GetResourceManager()->GetResourceRecord(GetIDForResource(pResource));
+
+				RDCASSERT(parent);
+
+				WrappedID3D11ShaderResourceView *view = (WrappedID3D11ShaderResourceView *)wrapped;
+				ResourceId id = view->GetResourceID();
+
+				RDCASSERT(GetResourceManager()->GetResourceRecord(id) == NULL);
+
+				D3D11ResourceRecord *record = GetResourceManager()->AddResourceRecord(id);
+				record->Length = 0;
+
+				record->AddParent(parent);
 
 				record->AddChunk(chunk);
 			}
@@ -771,16 +793,6 @@ bool WrappedID3D11Device::Serialise_CreateUnorderedAccessView(
 			GetResourceManager()->AddLiveResource(pView, ret);
 		}
 	}
-	else if(m_State >= WRITING)
-	{
-		D3D11ResourceRecord *record = GetResourceManager()->GetResourceRecord(ResourceId(Resource));
-
-		((WrappedID3D11UnorderedAccessView *)*ppUAView)->SetResourceRecord(record);
-
-		RDCASSERT(record);
-
-		record->AddRef();
-	}
 
 	return true;
 }
@@ -817,9 +829,19 @@ HRESULT WrappedID3D11Device::CreateUnorderedAccessView(
 				WrappedID3D11Texture3D::IsAlloc(pResource) ||
 				WrappedID3D11Buffer::IsAlloc(pResource))
 			{
-				D3D11ResourceRecord *record = GetResourceManager()->GetResourceRecord(GetIDForResource(pResource));
+				D3D11ResourceRecord *parent = GetResourceManager()->GetResourceRecord(GetIDForResource(pResource));
 
-				RDCASSERT(record);
+				RDCASSERT(parent);
+
+				WrappedID3D11UnorderedAccessView *view = (WrappedID3D11UnorderedAccessView *)wrapped;
+				ResourceId id = view->GetResourceID();
+
+				RDCASSERT(GetResourceManager()->GetResourceRecord(id) == NULL);
+
+				D3D11ResourceRecord *record = GetResourceManager()->AddResourceRecord(id);
+				record->Length = 0;
+
+				record->AddParent(parent);
 
 				record->AddChunk(chunk);
 			}
@@ -896,16 +918,6 @@ bool WrappedID3D11Device::Serialise_CreateRenderTargetView(
 			GetResourceManager()->AddLiveResource(pView, ret);
 		}
 	}
-	else if(m_State >= WRITING)
-	{
-		D3D11ResourceRecord *record = GetResourceManager()->GetResourceRecord(ResourceId(Resource));
-
-		RDCASSERT(record);
-
-		((WrappedID3D11RenderTargetView *)*ppRTView)->SetResourceRecord(record);
-
-		record->AddRef();
-	}
 
 	return true;
 }
@@ -942,9 +954,19 @@ HRESULT WrappedID3D11Device::CreateRenderTargetView(
 				WrappedID3D11Texture3D::IsAlloc(pResource) ||
 				WrappedID3D11Buffer::IsAlloc(pResource))
 			{
-				D3D11ResourceRecord *record = GetResourceManager()->GetResourceRecord(GetIDForResource(pResource));
+				D3D11ResourceRecord *parent = GetResourceManager()->GetResourceRecord(GetIDForResource(pResource));
 
-				RDCASSERT(record);
+				RDCASSERT(parent);
+
+				WrappedID3D11RenderTargetView *view = (WrappedID3D11RenderTargetView *)wrapped;
+				ResourceId id = view->GetResourceID();
+
+				RDCASSERT(GetResourceManager()->GetResourceRecord(id) == NULL);
+
+				D3D11ResourceRecord *record = GetResourceManager()->AddResourceRecord(id);
+				record->Length = 0;
+
+				record->AddParent(parent);
 
 				record->AddChunk(chunk);
 			}
@@ -994,16 +1016,6 @@ bool WrappedID3D11Device::Serialise_CreateDepthStencilView(
 			GetResourceManager()->AddLiveResource(pView, ret);
 		}
 	}
-	else if(m_State >= WRITING)
-	{
-		D3D11ResourceRecord *record = GetResourceManager()->GetResourceRecord(ResourceId(Resource));
-
-		((WrappedID3D11DepthStencilView *)*ppDepthStencilView)->SetResourceRecord(record);
-
-		RDCASSERT(record);
-
-		record->AddRef();
-	}
 
 	return true;
 }
@@ -1040,9 +1052,19 @@ HRESULT WrappedID3D11Device::CreateDepthStencilView(
 				WrappedID3D11Texture3D::IsAlloc(pResource) ||
 				WrappedID3D11Buffer::IsAlloc(pResource))
 			{
-				D3D11ResourceRecord *record = GetResourceManager()->GetResourceRecord(GetIDForResource(pResource));
+				D3D11ResourceRecord *parent = GetResourceManager()->GetResourceRecord(GetIDForResource(pResource));
 
-				RDCASSERT(record);
+				RDCASSERT(parent);
+
+				WrappedID3D11DepthStencilView *view = (WrappedID3D11DepthStencilView *)wrapped;
+				ResourceId id = view->GetResourceID();
+
+				RDCASSERT(GetResourceManager()->GetResourceRecord(id) == NULL);
+
+				D3D11ResourceRecord *record = GetResourceManager()->AddResourceRecord(id);
+				record->Length = 0;
+
+				record->AddParent(parent);
 
 				record->AddChunk(chunk);
 			}
@@ -1183,7 +1205,7 @@ bool WrappedID3D11Device::Serialise_CreateVertexShader(
 		}
 		else
 		{
-			ret = new WrappedID3D11Shader<ID3D11VertexShader>(ret, DXBC::DXBCFile(ShaderBytecode, (size_t)BytecodeLen), this);
+			ret = new WrappedID3D11Shader<ID3D11VertexShader>(ret, new DXBC::DXBCFile(ShaderBytecode, (size_t)BytecodeLen), this);
 
 			GetResourceManager()->AddLiveResource(pShader, ret);
 		}
@@ -1211,7 +1233,7 @@ HRESULT WrappedID3D11Device::CreateVertexShader(
 	{
 		SCOPED_LOCK(m_D3DLock);
 
-		wrapped = new WrappedID3D11Shader<ID3D11VertexShader>(real, DXBC::DXBCFile(pShaderBytecode, BytecodeLength), this);
+		wrapped = new WrappedID3D11Shader<ID3D11VertexShader>(real, new DXBC::DXBCFile(pShaderBytecode, BytecodeLength), this);
 
 		if(m_State >= WRITING)
 		{
@@ -1267,7 +1289,7 @@ bool WrappedID3D11Device::Serialise_CreateGeometryShader(
 		}
 		else
 		{		
-			ret = new WrappedID3D11Shader<ID3D11GeometryShader>(ret, DXBC::DXBCFile(ShaderBytecode, (size_t)BytecodeLen), this);
+			ret = new WrappedID3D11Shader<ID3D11GeometryShader>(ret, new DXBC::DXBCFile(ShaderBytecode, (size_t)BytecodeLen), this);
 
 			GetResourceManager()->AddLiveResource(pShader, ret);
 		}
@@ -1295,7 +1317,7 @@ HRESULT WrappedID3D11Device::CreateGeometryShader(
 	{
 		SCOPED_LOCK(m_D3DLock);
 
-		wrapped = new WrappedID3D11Shader<ID3D11GeometryShader>(real, DXBC::DXBCFile(pShaderBytecode, BytecodeLength), this);
+		wrapped = new WrappedID3D11Shader<ID3D11GeometryShader>(real, new DXBC::DXBCFile(pShaderBytecode, BytecodeLength), this);
 		
 		if(m_State >= WRITING)
 		{
@@ -1367,7 +1389,7 @@ bool WrappedID3D11Device::Serialise_CreateGeometryShaderWithStreamOutput(
 		}
 		else
 		{		
-			ret = new WrappedID3D11Shader<ID3D11GeometryShader>(ret, DXBC::DXBCFile(ShaderBytecode, (size_t)BytecodeLen), this);
+			ret = new WrappedID3D11Shader<ID3D11GeometryShader>(ret, new DXBC::DXBCFile(ShaderBytecode, (size_t)BytecodeLen), this);
 
 			GetResourceManager()->AddLiveResource(pShader, ret);
 		}
@@ -1407,7 +1429,7 @@ HRESULT WrappedID3D11Device::CreateGeometryShaderWithStreamOutput(
 	{
 		SCOPED_LOCK(m_D3DLock);
 
-		wrapped = new WrappedID3D11Shader<ID3D11GeometryShader>(real, DXBC::DXBCFile(pShaderBytecode, BytecodeLength), this);
+		wrapped = new WrappedID3D11Shader<ID3D11GeometryShader>(real, new DXBC::DXBCFile(pShaderBytecode, BytecodeLength), this);
 		
 		if(m_State >= WRITING)
 		{
@@ -1464,7 +1486,7 @@ bool WrappedID3D11Device::Serialise_CreatePixelShader(
 		}
 		else
 		{		
-			ret = new WrappedID3D11Shader<ID3D11PixelShader>(ret, DXBC::DXBCFile(ShaderBytecode, (size_t)BytecodeLen), this);
+			ret = new WrappedID3D11Shader<ID3D11PixelShader>(ret, new DXBC::DXBCFile(ShaderBytecode, (size_t)BytecodeLen), this);
 
 			GetResourceManager()->AddLiveResource(pShader, ret);
 		}
@@ -1492,7 +1514,7 @@ HRESULT WrappedID3D11Device::CreatePixelShader(
 	{
 		SCOPED_LOCK(m_D3DLock);
 
-		wrapped = new WrappedID3D11Shader<ID3D11PixelShader>(real, DXBC::DXBCFile(pShaderBytecode, BytecodeLength), this);
+		wrapped = new WrappedID3D11Shader<ID3D11PixelShader>(real, new DXBC::DXBCFile(pShaderBytecode, BytecodeLength), this);
 
 		if(m_State >= WRITING)
 		{
@@ -1548,7 +1570,7 @@ bool WrappedID3D11Device::Serialise_CreateHullShader(
 		}
 		else
 		{		
-			ret = new WrappedID3D11Shader<ID3D11HullShader>(ret, DXBC::DXBCFile(ShaderBytecode, (size_t)BytecodeLen), this);
+			ret = new WrappedID3D11Shader<ID3D11HullShader>(ret, new DXBC::DXBCFile(ShaderBytecode, (size_t)BytecodeLen), this);
 
 			GetResourceManager()->AddLiveResource(pShader, ret);
 		}
@@ -1576,7 +1598,7 @@ HRESULT WrappedID3D11Device::CreateHullShader(
 	{
 		SCOPED_LOCK(m_D3DLock);
 
-		wrapped = new WrappedID3D11Shader<ID3D11HullShader>(real, DXBC::DXBCFile(pShaderBytecode, BytecodeLength), this);
+		wrapped = new WrappedID3D11Shader<ID3D11HullShader>(real, new DXBC::DXBCFile(pShaderBytecode, BytecodeLength), this);
 		
 		if(m_State >= WRITING)
 		{
@@ -1632,7 +1654,7 @@ bool WrappedID3D11Device::Serialise_CreateDomainShader(
 		}
 		else
 		{		
-			ret = new WrappedID3D11Shader<ID3D11DomainShader>(ret, DXBC::DXBCFile(ShaderBytecode, (size_t)BytecodeLen), this);
+			ret = new WrappedID3D11Shader<ID3D11DomainShader>(ret, new DXBC::DXBCFile(ShaderBytecode, (size_t)BytecodeLen), this);
 
 			GetResourceManager()->AddLiveResource(pShader, ret);
 		}
@@ -1660,7 +1682,7 @@ HRESULT WrappedID3D11Device::CreateDomainShader(
 	{
 		SCOPED_LOCK(m_D3DLock);
 
-		wrapped = new WrappedID3D11Shader<ID3D11DomainShader>(real, DXBC::DXBCFile(pShaderBytecode, BytecodeLength), this);
+		wrapped = new WrappedID3D11Shader<ID3D11DomainShader>(real, new DXBC::DXBCFile(pShaderBytecode, BytecodeLength), this);
 		
 		if(m_State >= WRITING)
 		{
@@ -1716,7 +1738,7 @@ bool WrappedID3D11Device::Serialise_CreateComputeShader(
 		}
 		else
 		{		
-			ret = new WrappedID3D11Shader<ID3D11ComputeShader>(ret, DXBC::DXBCFile(ShaderBytecode, (size_t)BytecodeLen), this);
+			ret = new WrappedID3D11Shader<ID3D11ComputeShader>(ret, new DXBC::DXBCFile(ShaderBytecode, (size_t)BytecodeLen), this);
 
 			GetResourceManager()->AddLiveResource(pShader, ret);
 		}
@@ -1744,7 +1766,7 @@ HRESULT WrappedID3D11Device::CreateComputeShader(
 	{
 		SCOPED_LOCK(m_D3DLock);
 
-		wrapped = new WrappedID3D11Shader<ID3D11ComputeShader>(real, DXBC::DXBCFile(pShaderBytecode, BytecodeLength), this);
+		wrapped = new WrappedID3D11Shader<ID3D11ComputeShader>(real, new DXBC::DXBCFile(pShaderBytecode, BytecodeLength), this);
 		
 		if(m_State >= WRITING)
 		{
@@ -2015,6 +2037,8 @@ HRESULT WrappedID3D11Device::CreateBlendState(
 		
 		ID3D11BlendState *wrapped = new WrappedID3D11BlendState(real, this);
 
+		CachedObjectsGarbageCollect();
+
 		{
 			RDCASSERT(m_CachedStateObjects.find(wrapped) == m_CachedStateObjects.end());
 			wrapped->AddRef();
@@ -2087,6 +2111,8 @@ HRESULT WrappedID3D11Device::CreateDepthStencilState(
 		}
 		
 		ID3D11DepthStencilState *wrapped = new WrappedID3D11DepthStencilState(real, this);
+
+		CachedObjectsGarbageCollect();
 
 		{
 			RDCASSERT(m_CachedStateObjects.find(wrapped) == m_CachedStateObjects.end());
@@ -2161,6 +2187,8 @@ HRESULT WrappedID3D11Device::CreateRasterizerState(
 		
 		ID3D11RasterizerState *wrapped = new WrappedID3D11RasterizerState(real, this);
 
+		CachedObjectsGarbageCollect();
+
 		{
 			RDCASSERT(m_CachedStateObjects.find(wrapped) == m_CachedStateObjects.end());
 			wrapped->AddRef();
@@ -2233,6 +2261,8 @@ HRESULT WrappedID3D11Device::CreateSamplerState(
 		}
 
 		ID3D11SamplerState *wrapped = new WrappedID3D11SamplerState(real, this);
+
+		CachedObjectsGarbageCollect();
 
 		{
 			RDCASSERT(m_CachedStateObjects.find(wrapped) == m_CachedStateObjects.end());
@@ -2818,6 +2848,8 @@ HRESULT WrappedID3D11Device::OpenSharedResource(
 			{
 				SCOPED_SERIALISE_CONTEXT(OPEN_SHARED_RESOURCE);
 				Serialise_OpenSharedResource(hResource, ReturnedInterface, ppResource);
+
+				scope.SetAlignment(32);
 
 				chunk = scope.Get();
 			}

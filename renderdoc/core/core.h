@@ -92,10 +92,11 @@ enum RDCDriver
 	RDC_D3D11 = 1,
 	RDC_OpenGL = 2,
 	RDC_Mantle = 3,
-	RDC_Reserved2 = 4,
+	RDC_D3D12 = 4,
 	RDC_D3D10 = 5,
 	RDC_D3D9 = 6,
 	RDC_Image = 7,
+	RDC_Vulkan = 8,
 	RDC_Custom = 100000,
 	RDC_Custom0 = RDC_Custom,
 	RDC_Custom1,
@@ -108,6 +109,8 @@ enum RDCDriver
 	RDC_Custom8,
 	RDC_Custom9,
 };
+
+typedef uint32_t bool32;
 
 namespace DXBC { class DXBCFile; }
 namespace Callstack { class StackResolver; }
@@ -143,6 +146,7 @@ enum LoadProgressSection
 {
 	DebugManagerInit,
 	FileInitialRead,
+	FrameEventsRead,
 	NumSections,
 };
 
@@ -151,6 +155,8 @@ class IReplayDriver;
 
 typedef ReplayCreateStatus (*RemoteDriverProvider)(const char *logfile, IRemoteDriver **driver);
 typedef ReplayCreateStatus (*ReplayDriverProvider)(const char *logfile, IReplayDriver **driver);
+
+typedef void (*ShutdownFunction)();
 
 // this class mediates everything and owns any 'global' resources such as the crash handler.
 //
@@ -173,10 +179,12 @@ class RenderDoc
 		void Initialise();
 		void Shutdown();
 
+		void RegisterShutdownFunction(ShutdownFunction func) { m_ShutdownFunctions.insert(func); }
+
 		void SetReplayApp(bool replay) { m_Replay = replay; }
 		bool IsReplayApp() const { return m_Replay; }
 
-		void BecomeReplayHost(volatile bool32 &killReplay);
+		void BecomeReplayHost(volatile uint32_t &killReplay);
 
 		void SetCaptureOptions(const CaptureOptions *opts);
 		const CaptureOptions &GetCaptureOptions() const { return m_Options; }
@@ -232,6 +240,7 @@ class RenderDoc
 		void GetCurrentDriver(RDCDriver &driver, string &name);
 
 		uint32_t GetRemoteAccessIdent() const { return m_RemoteIdent; }
+		bool IsRemoteAccessConnected();
 
 		void Tick();
 
@@ -240,8 +249,8 @@ class RenderDoc
 
 		// add window-less frame capturers for use via users capturing
 		// manually through the renderdoc API with NULL device/window handles
-		void AddDefaultFrameCapturer(IFrameCapturer *cap);
-		void RemoveDefaultFrameCapturer(IFrameCapturer *cap);
+		void AddDeviceFrameCapturer(void *dev, IFrameCapturer *cap);
+		void RemoveDeviceFrameCapturer(void *dev);
 		
 		void StartFrameCapture(void *dev, void *wnd);
 		void SetActiveWindow(void *dev, void *wnd);
@@ -315,6 +324,8 @@ class RenderDoc
 		map<RDCDriver, ReplayDriverProvider> m_ReplayDriverProviders;
 		map<RDCDriver, RemoteDriverProvider> m_RemoteDriverProviders;
 
+		set<ShutdownFunction> m_ShutdownFunctions;
+
 		struct FrameCap
 		{
 			FrameCap() : FrameCapturer(NULL), RefCount(1) {}
@@ -333,16 +344,30 @@ class RenderDoc
 			{
 				return dev == o.dev && wnd == o.wnd;
 			}
+
 			bool operator <(const DeviceWnd &o) const
 			{
 				if(dev != o.dev) return dev < o.dev;
 				return wnd < o.wnd;
 			}
+
+			bool wildcardMatch(const DeviceWnd &o) const
+			{
+				if(dev == NULL || o.dev == NULL)
+					return wnd == NULL || o.wnd == NULL || wnd == o.wnd;
+
+				if(wnd == NULL || o.wnd == NULL)
+					return dev == NULL || o.dev == NULL || dev == o.dev;
+
+				return *this == o;
+			}
 		};
 
 		map<DeviceWnd, FrameCap> m_WindowFrameCapturers;
 		DeviceWnd m_ActiveWindow;
-		set<IFrameCapturer *> m_DefaultFrameCapturers;
+		map<void *, IFrameCapturer *> m_DeviceFrameCapturers;
+
+		IFrameCapturer *MatchFrameCapturer(void *dev, void *wnd);
 
 		volatile bool m_RemoteServerThreadShutdown;
 		volatile bool m_RemoteClientThreadShutdown;
@@ -353,6 +378,7 @@ class RenderDoc
 		static void RemoteAccessClientThread(void *s);
 
 		ICrashHandler *m_ExHandler;
+		bool m_GLSLang;
 };
 
 struct DriverRegistration

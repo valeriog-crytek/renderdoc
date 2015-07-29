@@ -55,7 +55,7 @@ struct GLInitParams : public RDCInitParams
 	uint32_t width;
 	uint32_t height;
 	
-	static const uint32_t GL_SERIALISE_VERSION = 0x000000C;
+	static const uint32_t GL_SERIALISE_VERSION = 0x0000010;
 
 	// version number internal to opengl stream
 	uint32_t SerialiseVersion;
@@ -152,11 +152,17 @@ class WrappedOpenGL : public IFrameCapturer
 		ResourceId m_ContextResourceID;
 		GLResourceRecord *m_ContextRecord;
 
-		GLResourceRecord *m_DisplayListRecord;
+		set<ResourceId> m_MissingTracks;
 
 		GLResourceManager *m_ResourceManager;
 
 		uint32_t m_FrameCounter;
+		uint32_t m_FailedFrame;
+		CaptureFailReason m_FailedReason;
+		uint32_t m_Failures;
+
+		CaptureFailReason m_FailureReason;
+		bool m_SuccessfulCapture;
 
 		uint64_t m_CurFileSize;
 
@@ -221,14 +227,17 @@ class WrappedOpenGL : public IFrameCapturer
 		struct TextureData
 		{
 			TextureData()
-				: dimension(0), width(0), height(0), depth(0), samples(0), creationFlags(0), internalFormat(eGL_NONE),
-				renderbufferReadTex(0)
+				: curType(eGL_NONE), dimension(0), emulated(false)
+				, width(0), height(0), depth(0), samples(0)
+				, creationFlags(0), internalFormat(eGL_NONE)
+				, renderbufferReadTex(0)
 			{
 				renderbufferFBOs[0] = renderbufferFBOs[1] = 0;
 			}
 			GLResource resource;
 			GLenum curType;
 			GLint dimension;
+			bool emulated;
 			GLint width, height, depth, samples;
 			uint32_t creationFlags;
 			GLenum internalFormat;
@@ -247,6 +256,7 @@ class WrappedOpenGL : public IFrameCapturer
 			GLenum type;
 			vector<string> sources;
 			vector<string> includepaths;
+			vector<uint32_t> spirv;
 			ShaderReflection reflection;
 			GLuint prog;
 		};
@@ -281,7 +291,6 @@ class WrappedOpenGL : public IFrameCapturer
 				GLbitfield use;
 			};
 
-			vector<ProgramUse> programs;
 			ResourceId stagePrograms[6];
 			ResourceId stageShaders[6];
 		};
@@ -313,12 +322,15 @@ class WrappedOpenGL : public IFrameCapturer
 		void AddEvent(GLChunkType type, string description, ResourceId ctx = ResourceId());
 		
 		void Serialise_CaptureScope(uint64_t offset);
-		bool HasSuccessfulCapture();
+		bool HasSuccessfulCapture(CaptureFailReason &reason) { reason = m_FailureReason; return m_SuccessfulCapture && m_ContextRecord->NumChunks() > 3; }
 		void AttemptCapture();
 		bool Serialise_BeginCaptureFrame(bool applyInitialState);
 		void BeginCaptureFrame();
 		void FinishCapture();
 		void ContextEndFrame();
+
+		void CleanupCapture();
+		void FreeCaptureData();
 
 		struct ContextData
 		{
@@ -444,6 +456,8 @@ class WrappedOpenGL : public IFrameCapturer
 		
 		void AddDebugMessage(DebugMessage msg) { if(m_State < WRITING) m_DebugMessages.push_back(msg); }
 		void AddDebugMessage(DebugMessageCategory c, DebugMessageSeverity sv, DebugMessageSource src, std::string d);
+
+		void AddMissingTrack(ResourceId id) { m_MissingTracks.insert(id); }
 
 		// replay interface
 		void Initialise(GLInitParams &params);
@@ -602,6 +616,7 @@ class WrappedOpenGL : public IFrameCapturer
 		GLenum glCheckFramebufferStatus(GLenum target);
 
 		IMPLEMENT_FUNCTION_SERIALISED(void, glObjectLabel(GLenum identifier, GLuint name, GLsizei length, const GLchar *label));
+		IMPLEMENT_FUNCTION_SERIALISED(void, glLabelObjectEXT(GLenum identifier, GLuint name, GLsizei length, const GLchar *label));
 		IMPLEMENT_FUNCTION_SERIALISED(void, glObjectPtrLabel(const void *ptr, GLsizei length, const GLchar *label));
 
 		IMPLEMENT_FUNCTION_SERIALISED(void, glDebugMessageCallback(GLDEBUGPROC callback, const void *userParam));
@@ -914,6 +929,7 @@ class WrappedOpenGL : public IFrameCapturer
 		IMPLEMENT_FUNCTION_SERIALISED(void, glGetNamedStringivARB(GLint namelen, const GLchar *name, GLenum pname, GLint *params));
 		IMPLEMENT_FUNCTION_SERIALISED(GLenum, glGetGraphicsResetStatus());
 		IMPLEMENT_FUNCTION_SERIALISED(void, glGetObjectLabel(GLenum identifier, GLuint name, GLsizei bufSize, GLsizei *length, GLchar *label));
+		IMPLEMENT_FUNCTION_SERIALISED(void, glGetObjectLabelEXT(GLenum identifier, GLuint name, GLsizei bufSize, GLsizei *length, GLchar *label));
 		IMPLEMENT_FUNCTION_SERIALISED(void, glGetObjectPtrLabel(const void *ptr, GLsizei bufSize, GLsizei *length, GLchar *label));
 		IMPLEMENT_FUNCTION_SERIALISED(GLuint, glGetDebugMessageLog(GLuint count, GLsizei bufSize, GLenum *sources, GLenum *types, GLuint *ids, GLenum *severities, GLsizei *lengths, GLchar *messageLog));
 		IMPLEMENT_FUNCTION_SERIALISED(void, glGetFramebufferAttachmentParameteriv(GLenum target, GLenum attachment, GLenum pname, GLint *params));
@@ -991,7 +1007,7 @@ class WrappedOpenGL : public IFrameCapturer
 		IMPLEMENT_FUNCTION_SERIALISED(void, glGetVertexAttribdv(GLuint index, GLenum pname, GLdouble *params));
 		IMPLEMENT_FUNCTION_SERIALISED(void, glGetVertexAttribfv(GLuint index, GLenum pname, GLfloat *params));
 		IMPLEMENT_FUNCTION_SERIALISED(void, glGetNamedBufferParameteri64v(GLuint buffer, GLenum pname, GLint64 *params));
-		IMPLEMENT_FUNCTION_SERIALISED(void, glGetNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizei size, void *data));
+		IMPLEMENT_FUNCTION_SERIALISED(void, glGetNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr size, void *data));
 
 		enum UniformType
 		{
@@ -1367,16 +1383,16 @@ class WrappedOpenGL : public IFrameCapturer
 		IMPLEMENT_FUNCTION_SERIALISED(void, glCreateProgramPipelines(GLsizei n, GLuint *pipelines));
 		IMPLEMENT_FUNCTION_SERIALISED(void, glCreateQueries(GLenum target, GLsizei n, GLuint *ids));
 
-		IMPLEMENT_FUNCTION_SERIALISED(void, glNamedBufferData(GLuint buffer, GLsizei size, const void *data, GLenum usage));
-		IMPLEMENT_FUNCTION_SERIALISED(void, glNamedBufferStorage(GLuint buffer, GLsizei size, const void *data, GLbitfield flags));
-		IMPLEMENT_FUNCTION_SERIALISED(void, glNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizei size, const void *data));
-		IMPLEMENT_FUNCTION_SERIALISED(void, glCopyNamedBufferSubData(GLuint readBuffer, GLuint writeBuffer, GLintptr readOffset, GLintptr writeOffset, GLsizei size));
-		IMPLEMENT_FUNCTION_SERIALISED(void, glClearNamedBufferSubData(GLuint buffer, GLenum internalformat, GLsizeiptr offset, GLsizei size, GLenum format, GLenum type, const void *data));
-		IMPLEMENT_FUNCTION_SERIALISED(void *, glMapNamedBufferRange(GLuint buffer, GLintptr offset, GLsizei length, GLbitfield access));
-		IMPLEMENT_FUNCTION_SERIALISED(void, glFlushMappedNamedBufferRange(GLuint buffer, GLintptr offset, GLsizei length));
+		IMPLEMENT_FUNCTION_SERIALISED(void, glNamedBufferData(GLuint buffer, GLsizeiptr size, const void *data, GLenum usage));
+		IMPLEMENT_FUNCTION_SERIALISED(void, glNamedBufferStorage(GLuint buffer, GLsizeiptr size, const void *data, GLbitfield flags));
+		IMPLEMENT_FUNCTION_SERIALISED(void, glNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr size, const void *data));
+		IMPLEMENT_FUNCTION_SERIALISED(void, glCopyNamedBufferSubData(GLuint readBuffer, GLuint writeBuffer, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size));
+		IMPLEMENT_FUNCTION_SERIALISED(void, glClearNamedBufferSubData(GLuint buffer, GLenum internalformat, GLsizeiptr offset, GLsizeiptr size, GLenum format, GLenum type, const void *data));
+		IMPLEMENT_FUNCTION_SERIALISED(void *, glMapNamedBufferRange(GLuint buffer, GLintptr offset, GLsizeiptr length, GLbitfield access));
+		IMPLEMENT_FUNCTION_SERIALISED(void, glFlushMappedNamedBufferRange(GLuint buffer, GLintptr offset, GLsizeiptr length));
 
 		IMPLEMENT_FUNCTION_SERIALISED(void, glTransformFeedbackBufferBase(GLuint xfb, GLuint index, GLuint buffer));
-		IMPLEMENT_FUNCTION_SERIALISED(void, glTransformFeedbackBufferRange(GLuint xfb, GLuint index, GLuint buffer, GLintptr offset, GLsizei size));
+		IMPLEMENT_FUNCTION_SERIALISED(void, glTransformFeedbackBufferRange(GLuint xfb, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size));
 
 		IMPLEMENT_FUNCTION_SERIALISED(void, glInvalidateNamedFramebufferData(GLuint framebuffer, GLsizei numAttachments, const GLenum *attachments));
 		IMPLEMENT_FUNCTION_SERIALISED(void, glInvalidateNamedFramebufferSubData(GLuint framebuffer, GLsizei numAttachments, const GLenum *attachments, GLint x, GLint y, GLsizei width, GLsizei height));
@@ -1387,7 +1403,7 @@ class WrappedOpenGL : public IFrameCapturer
 		IMPLEMENT_FUNCTION_SERIALISED(void, glBlitNamedFramebuffer(GLuint readFramebuffer, GLuint drawFramebuffer, GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter));
 
 		IMPLEMENT_FUNCTION_SERIALISED(void, glTextureBuffer(GLuint texture, GLenum internalformat, GLuint buffer));
-		IMPLEMENT_FUNCTION_SERIALISED(void, glTextureBufferRange(GLuint texture, GLenum internalformat, GLuint buffer, GLintptr offset, GLsizei size));
+		IMPLEMENT_FUNCTION_SERIALISED(void, glTextureBufferRange(GLuint texture, GLenum internalformat, GLuint buffer, GLintptr offset, GLsizeiptr size));
 		IMPLEMENT_FUNCTION_SERIALISED(void, glTextureStorage1D(GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width));
 		IMPLEMENT_FUNCTION_SERIALISED(void, glTextureStorage2D(GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height));
 		IMPLEMENT_FUNCTION_SERIALISED(void, glTextureStorage3D(GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth));

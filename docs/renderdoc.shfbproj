@@ -50,6 +50,8 @@
         <configuration />
       </PlugInConfig>
     </PlugInConfigurations>
+    <MaximumGroupParts>2</MaximumGroupParts>
+    <NamespaceGrouping>False</NamespaceGrouping>
   </PropertyGroup>
   <!-- There are no properties for these groups.  AnyCPU needs to appear in
        order for Visual Studio to perform the build.  The others are optional
@@ -119,6 +121,22 @@
     <Tokens Include="Tokens.tokens" />
   </ItemGroup>
   <ItemGroup>
+    <Image Include="imgs\Screenshots\PixelHistoryTimeline.png">
+      <ImageId>PixelHistoryTimeline</ImageId>
+      <AlternateText>Pixel History Timeline</AlternateText>
+      <AlternateText>Pixel history events displayed in timeline bar</AlternateText>
+      <ImageId>PixelHistoryTimeline</ImageId>
+    </Image>
+    <Image Include="imgs\Screenshots\BookmarksBar.png">
+      <ImageId>BookmarksBar</ImageId>
+      <AlternateText>Bookmarks Bar</AlternateText>
+      <ImageId>BookmarksBar</ImageId>
+      <AlternateText>Bookmarks Bar in Event Browser</AlternateText>
+    </Image>
+    <Image Include="imgs\icons\asterisk_orange.png">
+      <ImageId>asterisk_orange</ImageId>
+      <AlternateText>asterisk orange</AlternateText>
+    </Image>
     <Image Include="imgs\Screenshots\pythonshell.png">
       <ImageId>pythonshell</ImageId>
       <AlternateText>Python Shell</AlternateText>

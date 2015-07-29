@@ -171,6 +171,12 @@ bool WrappedID3D11DeviceContext::Serialise_UpdateSubresource1(ID3D11Resource *pD
 
 		byte *padding = m_State >= WRITING ? new byte[ResourceBufLen] : NULL;
 
+		// this is a bit of a hack, but to maintain backwards compatibility we have a
+		// separate function here that aligns the next serialised buffer to a 32-byte
+		// boundary in memory while writing (just skips the padding on read).
+		if(m_State >= WRITING || m_pDevice->GetLogVersion() >= 0x000007)
+			m_pSerialiser->AlignNextBuffer(32);
+
 		SERIALISE_ELEMENT_BUF(byte *, bufData, padding, ResourceBufLen);
 
 		if(record)
@@ -454,7 +460,6 @@ void WrappedID3D11DeviceContext::ClearView(ID3D11View *pView, const FLOAT Color[
 		ID3D11Resource *viewRes = NULL;
 		pView->GetResource(&viewRes);
 		
-		m_MissingTracks.insert(GetIDForResource(pView));
 		m_MissingTracks.insert(GetIDForResource(viewRes));
 
 		SAFE_RELEASE(viewRes);
@@ -466,13 +471,8 @@ void WrappedID3D11DeviceContext::ClearView(ID3D11View *pView, const FLOAT Color[
 		SCOPED_SERIALISE_CONTEXT(CLEAR_VIEW);
 		m_pSerialiser->Serialise("context", m_ResourceID);	
 		Serialise_ClearView(pView, Color, pRect, NumRects);
-		
-		ID3D11Resource *viewRes = NULL;
-		pView->GetResource(&viewRes);
-		ResourceId id = GetIDForResource(viewRes);
-		SAFE_RELEASE(viewRes);
 
-		D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(id);
+		D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForResource(pView));
 		RDCASSERT(record);
 
 		record->AddChunk(scope.Get());

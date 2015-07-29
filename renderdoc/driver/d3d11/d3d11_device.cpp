@@ -204,8 +204,10 @@ D3D11InitParams::D3D11InitParams()
 // and set some defaults if necessary).
 // Here we list which non-current versions we support, and what changed
 const uint32_t D3D11InitParams::D3D11_OLD_VERSIONS[D3D11InitParams::D3D11_NUM_SUPPORTED_OLD_VERSIONS] = {
-	0x0000004, // from 0x4 to 0x5, we added the stream-out hidden counters in the context's Serialise_BeginCaptureFrame
-	0x0000005, // from 0x5 to 0x6, several new calls were made 'drawcalls', like Copy & GenerateMips, with serialised debug messages
+	0x000004, // from 0x4 to 0x5, we added the stream-out hidden counters in the context's Serialise_BeginCaptureFrame
+	0x000005, // from 0x5 to 0x6, several new calls were made 'drawcalls', like Copy & GenerateMips, with serialised debug messages
+	0x000006, // from 0x6 to 0x7, we added some more padding in some buffer & texture chunks to get larger alignment than 16-byte
+	0x000007, // from 0x7 to 0x8, we changed the UAV arrays in the render state to be D3D11.1 sized and separate CS array.
 };
 
 ReplayCreateStatus D3D11InitParams::Serialise()
@@ -341,7 +343,7 @@ WrappedID3D11Device::WrappedID3D11Device(ID3D11Device* realDevice, D3D11InitPara
 		m_DeviceRecord->NumSubResources = 0;
 		m_DeviceRecord->SubResources = NULL;
 
-		RenderDoc::Inst().AddDefaultFrameCapturer(this);
+		RenderDoc::Inst().AddDeviceFrameCapturer((ID3D11Device *)this, this);
 	}
 	
 	ID3D11DeviceContext *context = NULL;
@@ -415,7 +417,7 @@ WrappedID3D11Device::~WrappedID3D11Device()
 	if(m_pCurrentWrappedDevice == this)
 		m_pCurrentWrappedDevice = NULL;
 
-	RenderDoc::Inst().RemoveDefaultFrameCapturer(this);
+	RenderDoc::Inst().RemoveDeviceFrameCapturer((ID3D11Device *)this);
 
 	for(auto it = m_CachedStateObjects.begin(); it != m_CachedStateObjects.end(); ++it)
 		if(*it)
@@ -523,6 +525,9 @@ HRESULT WrappedID3D11Device::QueryInterface(REFIID riid, void **ppvObject)
 {
 	// DEFINE_GUID(IID_IDirect3DDevice9, 0xd0223b96, 0xbf7a, 0x43fd, 0x92, 0xbd, 0xa4, 0x3b, 0xd, 0x82, 0xb9, 0xeb);
 	static const GUID IDirect3DDevice9_uuid = { 0xd0223b96, 0xbf7a, 0x43fd, { 0x92, 0xbd, 0xa4, 0x3b, 0xd, 0x82, 0xb9, 0xeb } };
+
+	// RenderDoc UUID {A7AA6116-9C8D-4BBA-9083-B4D816B71B78}
+	static const GUID IRenderDoc_uuid = { 0xa7aa6116, 0x9c8d, 0x4bba, { 0x90, 0x83, 0xb4, 0xd8, 0x16, 0xb7, 0x1b, 0x78 } };
 
 	HRESULT hr = S_OK;
 
@@ -666,6 +671,12 @@ HRESULT WrappedID3D11Device::QueryInterface(REFIID riid, void **ppvObject)
 		{
 			return E_NOINTERFACE;
 		}
+	}
+	else if(riid == IRenderDoc_uuid)
+	{
+		AddRef();
+		*ppvObject = static_cast<IUnknown*>(this);
+		return S_OK;
 	}
 	else
 	{
@@ -995,9 +1006,11 @@ void WrappedID3D11Device::ReadLogInitialisation()
 
 	m_pSerialiser->Rewind();
 
+	uint32_t captureChunkIdx = 0;
+
 	while(!m_pSerialiser->AtEnd())
 	{
-		m_pSerialiser->SkipToChunk(CAPTURE_SCOPE);
+		m_pSerialiser->SkipToChunk(CAPTURE_SCOPE, &captureChunkIdx);
 
 		// found a capture chunk
 		if(!m_pSerialiser->AtEnd())
@@ -1043,7 +1056,7 @@ void WrappedID3D11Device::ReadLogInitialisation()
 
 		m_pSerialiser->PopContext(NULL, context);
 		
-		RenderDoc::Inst().SetProgress(FileInitialRead, float(m_pSerialiser->GetOffset())/float(m_pSerialiser->GetSize()));
+		RenderDoc::Inst().SetProgress(FileInitialRead, float(chunkIdx)/float(captureChunkIdx));
 
 		if(context == CAPTURE_SCOPE)
 		{
@@ -1591,9 +1604,13 @@ bool WrappedID3D11Device::Serialise_InitialState(ID3D11DeviceChild *res)
 
 		SERIALISE_ELEMENT(uint32_t, numSubresources, desc.MipLevels*desc.ArraySize);
 
-		bool bigrt = ((desc.BindFlags & D3D11_BIND_RENDER_TARGET) != 0 ||
-					  (desc.BindFlags & D3D11_BIND_DEPTH_STENCIL) != 0 ||
-					  (desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0) && (desc.Width > 64 && desc.Height > 64);
+		bool bigrt = (
+		               (desc.BindFlags & D3D11_BIND_RENDER_TARGET) != 0 ||
+		               (desc.BindFlags & D3D11_BIND_DEPTH_STENCIL) != 0 ||
+		               (desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0
+		             ) &&
+		             (desc.Width > 64 && desc.Height > 64) &&
+		             (desc.Width != desc.Height);
 
 		if(bigrt && m_ResourceManager->ReadBeforeWrite(Id))
 			bigrt = false;
@@ -2325,7 +2342,7 @@ void WrappedID3D11Device::ReleaseSwapchainResources(IDXGISwapChain *swap)
 
 		Keyboard::RemoveInputWindow(desc.OutputWindow);
 
-		RenderDoc::Inst().RemoveFrameCapturer(this, desc.OutputWindow);
+		RenderDoc::Inst().RemoveFrameCapturer((ID3D11Device *)this, desc.OutputWindow);
 	}
 
 	auto it = m_SwapChains.find(swap);
@@ -2434,7 +2451,7 @@ void WrappedID3D11Device::SetSwapChainTexture(IDXGISwapChain *swap, DXGI_SWAP_CH
 
 		Keyboard::AddInputWindow(sdesc.OutputWindow);
 
-		RenderDoc::Inst().AddFrameCapturer(this, sdesc.OutputWindow, this);
+		RenderDoc::Inst().AddFrameCapturer((ID3D11Device *)this, sdesc.OutputWindow, this);
 	}
 }
 
@@ -2980,7 +2997,7 @@ HRESULT WrappedID3D11Device::Present(IDXGISwapChain *swap, UINT SyncInterval, UI
 
 	DXGI_SWAP_CHAIN_DESC swapdesc;
 	swap->GetDesc(&swapdesc);
-	bool activeWindow = RenderDoc::Inst().IsActiveWindow(this, swapdesc.OutputWindow);
+	bool activeWindow = RenderDoc::Inst().IsActiveWindow((ID3D11Device *)this, swapdesc.OutputWindow);
 
 	if(m_State == WRITING_IDLE)
 	{
@@ -3146,6 +3163,39 @@ HRESULT WrappedID3D11Device::Present(IDXGISwapChain *swap, UINT SyncInterval, UI
 	return S_OK;
 }
 
+void WrappedID3D11Device::CachedObjectsGarbageCollect()
+{
+	// 4000 is a fairly arbitrary number, chosen to make sure this garbage
+	// collection kicks in as rarely as possible (4000 is a *lot* of unique
+	// state objects to have), while still meaning that we'll never
+	// accidentally cause a state object to fail to create because the app
+	// expects only N to be alive but we're caching M more causing M+N>4096
+	if(m_CachedStateObjects.size() < 4000) return;
+
+	// Now release all purely cached objects that have no external refcounts.
+	// This will thrash if we have e.g. 2000 rasterizer state objects, all
+	// referenced, and 2000 sampler state objects, all referenced.
+
+	for(auto it=m_CachedStateObjects.begin(); it != m_CachedStateObjects.end();)
+	{
+		ID3D11DeviceChild *o = *it;
+
+		o->AddRef();
+		if(o->Release() == 1)
+		{
+			auto eraseit = it;
+			++it;
+			o->Release();
+			InternalRelease();
+			m_CachedStateObjects.erase(eraseit);
+		}
+		else
+		{
+			++it;
+		}
+	}
+}
+
 void WrappedID3D11Device::AddDeferredContext(WrappedID3D11DeviceContext *defctx)
 {
 	RDCASSERT(m_DeferredContexts.find(defctx) == m_DeferredContexts.end());
@@ -3221,46 +3271,6 @@ bool WrappedID3D11Device::Serialise_ReleaseResource(ID3D11DeviceChild *res)
 		D3D11ResourceRecord *record = GetResourceManager()->GetResourceRecord(resource);
 		if(record)
 			record->Delete(m_ResourceManager);
-
-		switch(resourceType)
-		{
-			case Resource_RenderTargetView:
-			{
-				WrappedID3D11RenderTargetView* view = (WrappedID3D11RenderTargetView *)res;
-
-				D3D11ResourceRecord *viewRecord = view->GetResourceRecord();
-				if(viewRecord)
-					viewRecord->Delete(m_ResourceManager);
-				break;
-			}
-			case Resource_ShaderResourceView:
-			{
-				WrappedID3D11ShaderResourceView* view = (WrappedID3D11ShaderResourceView *)res;
-
-				D3D11ResourceRecord *viewRecord = view->GetResourceRecord();
-				if(viewRecord)
-					viewRecord->Delete(m_ResourceManager);
-				break;
-			}
-			case Resource_DepthStencilView:
-			{
-				WrappedID3D11DepthStencilView* view = (WrappedID3D11DepthStencilView *)res;
-
-				D3D11ResourceRecord *viewRecord = view->GetResourceRecord();
-				if(viewRecord)
-					viewRecord->Delete(m_ResourceManager);
-				break;
-			}
-			case Resource_UnorderedAccessView:
-			{
-				WrappedID3D11UnorderedAccessView* view = (WrappedID3D11UnorderedAccessView *)res;
-
-				D3D11ResourceRecord *viewRecord = view->GetResourceRecord();
-				if(viewRecord)
-					viewRecord->Delete(m_ResourceManager);
-				break;
-			}
-		}
 	}
 	if(m_State < WRITING && GetResourceManager()->HasLiveResource(resource))
 	{
@@ -3291,8 +3301,6 @@ void WrappedID3D11Device::ReleaseResource(ID3D11DeviceChild *res)
 
 	D3D11ResourceRecord *record = m_DeviceRecord;
 
-	bool removegpu = true;
-
 	if(m_State == WRITING_IDLE)
 	{
 		if(type == Resource_ShaderResourceView ||
@@ -3305,21 +3313,6 @@ void WrappedID3D11Device::ReleaseResource(ID3D11DeviceChild *res)
 			type == Resource_Texture3D ||
 			type == Resource_CommandList)
 		{
-			if(type == Resource_ShaderResourceView ||
-				type == Resource_DepthStencilView ||
-				type == Resource_UnorderedAccessView ||
-				type == Resource_RenderTargetView
-				)
-			{
-				ID3D11View *view = (ID3D11View *)res;
-				ID3D11Resource *viewRes = NULL;
-				view->GetResource(&viewRes);
-				idx = GetIDForResource(viewRes);
-				SAFE_RELEASE(viewRes);
-
-				removegpu = false;
-			}
-
 			record = GetResourceManager()->GetResourceRecord(idx);
 			RDCASSERT(record);
 
@@ -3336,8 +3329,7 @@ void WrappedID3D11Device::ReleaseResource(ID3D11DeviceChild *res)
 		}
 	}
 
-	if(removegpu)
-		GetResourceManager()->MarkCleanResource(idx);
+	GetResourceManager()->MarkCleanResource(idx);
 
 	if(type == Resource_DeviceContext)
 	{

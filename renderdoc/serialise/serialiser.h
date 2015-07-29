@@ -268,7 +268,7 @@ class Serialiser
 		}
 
 		// assumes buffer head is sitting before a chunk (ie. pushcontext will be valid)
-		void SkipToChunk(uint32_t chunkIdx)
+		void SkipToChunk(uint32_t chunkIdx, uint32_t *idx = NULL)
 		{
 			do
 			{
@@ -288,6 +288,8 @@ class Serialiser
 					SkipCurrentChunk();
 					PopContext(NULL, 1);
 				}
+
+				if(idx) (*idx)++;
 
 			} while(!AtEnd());
 		}
@@ -487,6 +489,7 @@ class Serialiser
 		// memory will be returned, or it must be already large enough.
 		void SerialiseBuffer(const char *name, byte *&buf, size_t &len);
 		void SkipBuffer();
+		void AlignNextBuffer(const size_t alignment);
 
 		// NOT recommended interface. Useful for specific situations if e.g. you have
 		// a buffer of data that is not arbitrary in size and can be determined by a 'type' or

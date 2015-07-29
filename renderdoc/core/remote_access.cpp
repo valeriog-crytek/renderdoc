@@ -351,7 +351,7 @@ void RenderDoc::RemoteAccessServerThread(void *s)
 	Threading::ReleaseModuleExitThread();
 }
 
-struct RemoteAccess
+struct RemoteAccess : public IRemoteAccess
 {
 	public:
 		RemoteAccess(Network::Socket *sock, string clientName, bool forceConnection, bool localhost)
@@ -397,6 +397,8 @@ struct RemoteAccess
 
 			SAFE_DELETE(ser);
 		}
+
+		virtual ~RemoteAccess() {}
 
 		bool Connected() { return m_Socket != NULL && m_Socket->Connected(); }
 		

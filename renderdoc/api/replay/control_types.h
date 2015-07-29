@@ -54,13 +54,13 @@ struct MeshFormat
 	float farPlane;
 };
 
+class Camera;
+
 struct MeshDisplay
 {
 	MeshDataStage type;
 
-	bool32 arcballCamera;
-	FloatVector cameraPos;
-	FloatVector cameraRot;
+	Camera *cam;
 
 	bool32 ortho;
 	float fov, aspect;
@@ -74,6 +74,10 @@ struct MeshDisplay
 
 	FloatVector prevMeshColour;
 	FloatVector currentMeshColour;
+
+	FloatVector minBounds;
+	FloatVector maxBounds;
+	bool32 showBBox;
 
 	SolidShadeMode solidShadeMode;
 	bool32 wireframeDraw;

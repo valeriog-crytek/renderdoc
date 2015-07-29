@@ -40,6 +40,7 @@ D3D11RenderState::D3D11RenderState(Serialiser *ser)
 	RDCEraseEl(PS);
 	RDCEraseEl(OM);
 	RDCEraseEl(CS);
+	RDCEraseEl(CSUAVs);
 	Clear();
 	m_pSerialiser = ser;
 
@@ -59,6 +60,7 @@ D3D11RenderState::D3D11RenderState(const D3D11RenderState &other)
 	RDCEraseEl(PS);
 	RDCEraseEl(OM);
 	RDCEraseEl(CS);
+	RDCEraseEl(CSUAVs);
 	*this = other;
 
 	m_ImmediatePipeline = false;
@@ -79,6 +81,7 @@ D3D11RenderState &D3D11RenderState::operator =(const D3D11RenderState &other)
 	memcpy(&PS, &other.PS, sizeof(PS));
 	memcpy(&OM, &other.OM, sizeof(OM));
 	memcpy(&CS, &other.CS, sizeof(CS));
+	memcpy(&CSUAVs, &other.CSUAVs, sizeof(CSUAVs));
 
 	m_ImmediatePipeline = false;
 	m_pDevice = NULL;
@@ -115,14 +118,14 @@ void D3D11RenderState::ReleaseRefs()
 		for(UINT i=0; i < D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT; i++)
 			ReleaseRef(sh->SRVs[i]);
 		
-		for(UINT i=0; i < D3D11_PS_CS_UAV_REGISTER_COUNT; i++)
-			ReleaseRef(sh->UAVs[i]);
-		
 		for(UINT i=0; i < D3D11_SHADER_MAX_INTERFACES; i++)
 			ReleaseRef(sh->Instances[i]);
 		
 		sh++;
 	}
+	
+	for(UINT i=0; i < D3D11_1_UAV_SLOT_COUNT; i++)
+		ReleaseRef(CSUAVs[i]);
 	
 	for(UINT i=0; i < D3D11_SO_BUFFER_SLOT_COUNT; i++)
 		ReleaseRef(SO.Buffers[i]);
@@ -135,7 +138,7 @@ void D3D11RenderState::ReleaseRefs()
 	for(UINT i=0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; i++)
 		ReleaseRef(OM.RenderTargets[i]);
 
-	for(UINT i=0; i < D3D11_PS_CS_UAV_REGISTER_COUNT; i++)
+	for(UINT i=0; i < D3D11_1_UAV_SLOT_COUNT; i++)
 		ReleaseRef(OM.UAVs[i]);
 
 	ReleaseRef(OM.DepthView);
@@ -150,27 +153,22 @@ void D3D11RenderState::ReleaseRefs()
 	RDCEraseEl(PS);
 	RDCEraseEl(OM);
 	RDCEraseEl(CS);
+	RDCEraseEl(CSUAVs);
 }
 
 void D3D11RenderState::MarkDirty(D3D11ResourceManager *manager) const
 {
-	const shader *sh = &VS;
-	for(int s=0; s < 6; s++)
+	for(UINT i = 0; i < D3D11_1_UAV_SLOT_COUNT; i++)
 	{
-		for(UINT i=0; i < D3D11_PS_CS_UAV_REGISTER_COUNT; i++)
+		ID3D11Resource *res = NULL;
+		if(CSUAVs[i])
 		{
-			ID3D11Resource *res = NULL;
-			if(sh->UAVs[i])
-			{
-				sh->UAVs[i]->GetResource(&res);
-				manager->MarkDirtyResource(GetIDForResource(res));
-				SAFE_RELEASE(res);
-			}
+			CSUAVs[i]->GetResource(&res);
+			manager->MarkDirtyResource(GetIDForResource(res));
+			SAFE_RELEASE(res);
 		}
-
-		sh++;
 	}
-		
+
 	for(UINT i=0; i < D3D11_SO_BUFFER_SLOT_COUNT; i++)
 		manager->MarkDirtyResource(GetIDForResource(SO.Buffers[i]));
 
@@ -185,7 +183,7 @@ void D3D11RenderState::MarkDirty(D3D11ResourceManager *manager) const
 		}
 	}
 
-	for(UINT i=0; i < D3D11_PS_CS_UAV_REGISTER_COUNT; i++)
+	for(UINT i=0; i < D3D11_1_UAV_SLOT_COUNT; i++)
 	{
 		ID3D11Resource *res = NULL;
 		if(OM.UAVs[i])
@@ -228,24 +226,8 @@ void D3D11RenderState::MarkReferenced(WrappedID3D11DeviceContext *ctx, bool init
 			if(sh->SRVs[i])
 			{
 				sh->SRVs[i]->GetResource(&res);
+				ctx->MarkResourceReferenced(GetIDForResource(sh->SRVs[i]), initial ? eFrameRef_Unknown : eFrameRef_Read);
 				ctx->MarkResourceReferenced(GetIDForResource(res), initial ? eFrameRef_Unknown : eFrameRef_Read);
-				SAFE_RELEASE(res);
-			}
-		}
-
-		for(UINT i=0; i < D3D11_PS_CS_UAV_REGISTER_COUNT; i++)
-		{
-			ID3D11Resource *res = NULL;
-			if(sh->UAVs[i])
-			{
-				sh->UAVs[i]->GetResource(&res);
-				ctx->m_MissingTracks.insert(GetIDForResource(res));
-				ctx->m_MissingTracks.insert(GetIDForResource(sh->UAVs[i]));
-				// UAVs we always assume to be partial updates
-				ctx->MarkResourceReferenced(GetIDForResource(sh->UAVs[i]), initial ? eFrameRef_Unknown : eFrameRef_Read);
-				ctx->MarkResourceReferenced(GetIDForResource(sh->UAVs[i]), initial ? eFrameRef_Unknown : eFrameRef_Write);
-				ctx->MarkResourceReferenced(GetIDForResource(res), initial ? eFrameRef_Unknown : eFrameRef_Read);
-				ctx->MarkResourceReferenced(GetIDForResource(res), initial ? eFrameRef_Unknown : eFrameRef_Write);
 				SAFE_RELEASE(res);
 			}
 		}
@@ -253,6 +235,22 @@ void D3D11RenderState::MarkReferenced(WrappedID3D11DeviceContext *ctx, bool init
 		sh++;
 	}
 		
+	for(UINT i = 0; i < D3D11_1_UAV_SLOT_COUNT; i++)
+	{
+		ID3D11Resource *res = NULL;
+		if(CSUAVs[i])
+		{
+			CSUAVs[i]->GetResource(&res);
+			ctx->m_MissingTracks.insert(GetIDForResource(res));
+			// UAVs we always assume to be partial updates
+			ctx->MarkResourceReferenced(GetIDForResource(CSUAVs[i]), initial ? eFrameRef_Unknown : eFrameRef_Read);
+			ctx->MarkResourceReferenced(GetIDForResource(CSUAVs[i]), initial ? eFrameRef_Unknown : eFrameRef_Write);
+			ctx->MarkResourceReferenced(GetIDForResource(res), initial ? eFrameRef_Unknown : eFrameRef_Read);
+			ctx->MarkResourceReferenced(GetIDForResource(res), initial ? eFrameRef_Unknown : eFrameRef_Write);
+			SAFE_RELEASE(res);
+		}
+	}
+
 	for(UINT i=0; i < D3D11_SO_BUFFER_SLOT_COUNT; i++)
 		ctx->MarkResourceReferenced(GetIDForResource(SO.Buffers[i]), initial ? eFrameRef_Unknown : eFrameRef_Write);
 
@@ -350,6 +348,7 @@ void D3D11RenderState::MarkReferenced(WrappedID3D11DeviceContext *ctx, bool init
 		{
 			OM.RenderTargets[i]->GetResource(&res);
 			ctx->m_MissingTracks.insert(GetIDForResource(res));
+			ctx->MarkResourceReferenced(GetIDForResource(OM.RenderTargets[i]), initial ? eFrameRef_Unknown : eFrameRef_Read);
 			if(viewportScissorPartial)
 				ctx->MarkResourceReferenced(GetIDForResource(res), initial ? eFrameRef_Unknown : eFrameRef_Read);
 			ctx->MarkResourceReferenced(GetIDForResource(res), initial ? eFrameRef_Unknown : eFrameRef_Write);
@@ -357,13 +356,12 @@ void D3D11RenderState::MarkReferenced(WrappedID3D11DeviceContext *ctx, bool init
 		}
 	}
 
-	for(UINT i=0; i < D3D11_PS_CS_UAV_REGISTER_COUNT; i++)
+	for(UINT i=0; i < D3D11_1_UAV_SLOT_COUNT; i++)
 	{
 		ID3D11Resource *res = NULL;
 		if(OM.UAVs[i])
 		{
 			OM.UAVs[i]->GetResource(&res);
-			ctx->m_MissingTracks.insert(GetIDForResource(OM.UAVs[i]));
 			ctx->m_MissingTracks.insert(GetIDForResource(res));
 			// UAVs we always assume to be partial updates
 			ctx->MarkResourceReferenced(GetIDForResource(OM.UAVs[i]), initial ? eFrameRef_Unknown : eFrameRef_Read);
@@ -380,6 +378,7 @@ void D3D11RenderState::MarkReferenced(WrappedID3D11DeviceContext *ctx, bool init
 		{
 			OM.DepthView->GetResource(&res);
 			ctx->m_MissingTracks.insert(GetIDForResource(res));
+			ctx->MarkResourceReferenced(GetIDForResource(OM.DepthView), initial ? eFrameRef_Unknown : eFrameRef_Read);
 			if(viewportScissorPartial)
 				ctx->MarkResourceReferenced(GetIDForResource(res), initial ? eFrameRef_Unknown : eFrameRef_Read);
 			ctx->MarkResourceReferenced(GetIDForResource(res), initial ? eFrameRef_Unknown : eFrameRef_Write);
@@ -410,14 +409,14 @@ void D3D11RenderState::AddRefs()
 		for(UINT i=0; i < D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT; i++)
 			TakeRef(sh->SRVs[i]);
 		
-		for(UINT i=0; i < D3D11_PS_CS_UAV_REGISTER_COUNT; i++)
-			TakeRef(sh->UAVs[i]);
-		
 		for(UINT i=0; i < D3D11_SHADER_MAX_INTERFACES; i++)
 			TakeRef(sh->Instances[i]);
 		
 		sh++;
 	}
+		
+	for(UINT i = 0; i < D3D11_1_UAV_SLOT_COUNT; i++)
+		TakeRef(CSUAVs[i]);
 		
 	for(UINT i=0; i < D3D11_SO_BUFFER_SLOT_COUNT; i++)
 		TakeRef(SO.Buffers[i]);
@@ -430,7 +429,7 @@ void D3D11RenderState::AddRefs()
 	for(UINT i=0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; i++)
 		TakeRef(OM.RenderTargets[i]);
 
-	for(UINT i=0; i < D3D11_PS_CS_UAV_REGISTER_COUNT; i++)
+	for(UINT i=0; i < D3D11_1_UAV_SLOT_COUNT; i++)
 		TakeRef(OM.UAVs[i]);
 
 	TakeRef(OM.DepthView);
@@ -477,7 +476,7 @@ void D3D11RenderState::Serialise(LogState m_State, WrappedID3D11Device *device)
 	m_pSerialiser->Serialise("IA.indexFormat", IA.IndexFormat);
 	m_pSerialiser->Serialise("IA.indexOffset", IA.IndexOffset);
 
-	const char *names[] = { "VS", "DS", "HS", "GS", "CS", "PS" };
+	const char *names[] = { "VS", "HS", "DS", "GS", "PS", "CS" };
 	shader *sh = &VS;
 	for(int s=0; s < 6; s++)
 	{
@@ -534,21 +533,25 @@ void D3D11RenderState::Serialise(LogState m_State, WrappedID3D11Device *device)
 					sh->SRVs[i] = NULL;
 			}
 		}
-
-		for(int i=0; i < D3D11_PS_CS_UAV_REGISTER_COUNT; i++)
+	
+		// Before 0x000008 the UAVs were serialised per-shader (even though it was only for compute) here
+		if(device->GetLogVersion() < 0x000008)
 		{
-			ResourceId id;
-			if(m_State >= WRITING) id = GetIDForResource(sh->UAVs[i]);
-			m_pSerialiser->Serialise((string(names[s]) + ".UAVs").c_str(), id);
-			if(m_State < WRITING)
+			for(int i = 0; i < D3D11_PS_CS_UAV_REGISTER_COUNT; i++)
 			{
-				if(device->GetResourceManager()->HasLiveResource(id)) 
-					sh->UAVs[i] = (ID3D11UnorderedAccessView *)device->GetResourceManager()->GetLiveResource(id);
-				else
-					sh->UAVs[i] = NULL;
+				ResourceId id;
+				m_pSerialiser->Serialise("CSUAVs", id);
+
+				if(s == 5)
+				{
+					if(device->GetResourceManager()->HasLiveResource(id))
+						CSUAVs[i] = (ID3D11UnorderedAccessView *)device->GetResourceManager()->GetLiveResource(id);
+					else
+						CSUAVs[i] = NULL;
+				}
 			}
 		}
-		
+
 		for(int i=0; i < D3D11_SHADER_MAX_INTERFACES; i++)
 		{
 			ResourceId id;
@@ -564,6 +567,23 @@ void D3D11RenderState::Serialise(LogState m_State, WrappedID3D11Device *device)
 		}
 
 		sh++;
+	}
+
+	if(device->GetLogVersion() >= 0x000008)
+	{
+		for(int i = 0; i < D3D11_1_UAV_SLOT_COUNT; i++)
+		{
+			ResourceId id;
+			if(m_State >= WRITING) id = GetIDForResource(CSUAVs[i]);
+			m_pSerialiser->Serialise("CSUAVs", id);
+			if(m_State < WRITING)
+			{
+				if(device->GetResourceManager()->HasLiveResource(id))
+					CSUAVs[i] = (ID3D11UnorderedAccessView *)device->GetResourceManager()->GetLiveResource(id);
+				else
+					CSUAVs[i] = NULL;
+			}
+		}
 	}
 
 	for(int i=0; i < D3D11_SO_BUFFER_SLOT_COUNT; i++)
@@ -630,7 +650,9 @@ void D3D11RenderState::Serialise(LogState m_State, WrappedID3D11Device *device)
 
 	m_pSerialiser->Serialise("OM.UAVStartSlot", OM.UAVStartSlot);
 
-	for(int i=0; i < D3D11_PS_CS_UAV_REGISTER_COUNT; i++)
+	const int numUAVs = device->GetLogVersion() >= 0x000008 ? D3D11_1_UAV_SLOT_COUNT : D3D11_PS_CS_UAV_REGISTER_COUNT;
+
+	for(int i=0; i < numUAVs; i++)
 	{
 		ResourceId UAV;
 		if(m_State >= WRITING) UAV = GetIDForResource(OM.UAVs[i]);
@@ -706,7 +728,10 @@ D3D11RenderState::D3D11RenderState(WrappedID3D11DeviceContext *context)
 
 	// CS
 	context->CSGetShaderResources(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT, CS.SRVs);
-	context->CSGetUnorderedAccessViews(0, D3D11_PS_CS_UAV_REGISTER_COUNT, CS.UAVs);
+	if(context->IsFL11_1())
+		context->CSGetUnorderedAccessViews(0, D3D11_1_UAV_SLOT_COUNT, CSUAVs);
+	else
+		context->CSGetUnorderedAccessViews(0, D3D11_PS_CS_UAV_REGISTER_COUNT, CSUAVs);
 	context->CSGetSamplers(0, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT, CS.Samplers);
 	context->CSGetShader((ID3D11ComputeShader **)&CS.Shader, CS.Instances, &CS.NumInstances);
 
@@ -761,10 +786,15 @@ D3D11RenderState::D3D11RenderState(WrappedID3D11DeviceContext *context)
 			SAFE_RELEASE(tmpViews[i]);
 		}
 	}
-
-	context->OMGetRenderTargetsAndUnorderedAccessViews(OM.UAVStartSlot, OM.RenderTargets,
-														&OM.DepthView,
-														OM.UAVStartSlot, D3D11_PS_CS_UAV_REGISTER_COUNT-OM.UAVStartSlot, OM.UAVs);
+	
+	if(context->IsFL11_1())
+		context->OMGetRenderTargetsAndUnorderedAccessViews(OM.UAVStartSlot, OM.RenderTargets,
+															&OM.DepthView,
+															OM.UAVStartSlot, D3D11_1_UAV_SLOT_COUNT-OM.UAVStartSlot, OM.UAVs);
+	else
+		context->OMGetRenderTargetsAndUnorderedAccessViews(OM.UAVStartSlot, OM.RenderTargets,
+															&OM.DepthView,
+															OM.UAVStartSlot, D3D11_PS_CS_UAV_REGISTER_COUNT-OM.UAVStartSlot, OM.UAVs);
 }
 
 void D3D11RenderState::Clear()
@@ -811,12 +841,15 @@ void D3D11RenderState::ApplyState(WrappedID3D11DeviceContext *context)
 	context->RSSetViewports(RS.NumViews, RS.Viewports);
 	context->RSSetScissorRects(RS.NumScissors, RS.Scissors);
 
-	UINT UAV_keepcounts[D3D11_PS_CS_UAV_REGISTER_COUNT] = { (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1 };
+	UINT UAV_keepcounts[D3D11_1_UAV_SLOT_COUNT] = { (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1 };
 
 	// CS
 	context->CSSetShaderResources(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT, CS.SRVs);
-	context->CSSetUnorderedAccessViews(0, D3D11_PS_CS_UAV_REGISTER_COUNT, CS.UAVs, UAV_keepcounts);
 	context->CSSetSamplers(0, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT, CS.Samplers);
+	if(context->IsFL11_1())
+		context->CSSetUnorderedAccessViews(0, D3D11_1_UAV_SLOT_COUNT, CSUAVs, UAV_keepcounts);
+	else
+		context->CSSetUnorderedAccessViews(0, D3D11_PS_CS_UAV_REGISTER_COUNT, CSUAVs, UAV_keepcounts);
 	context->CSSetShader((ID3D11ComputeShader *)CS.Shader, CS.Instances, CS.NumInstances);
 
 	// PS
@@ -843,13 +876,18 @@ void D3D11RenderState::ApplyState(WrappedID3D11DeviceContext *context)
 	// OM
 	context->OMSetBlendState(OM.BlendState, OM.BlendFactor, OM.SampleMask);
 	context->OMSetDepthStencilState(OM.DepthStencilState, OM.StencRef);
-
-	context->OMSetRenderTargetsAndUnorderedAccessViews(OM.UAVStartSlot, OM.RenderTargets,
-														OM.DepthView,
-														OM.UAVStartSlot, D3D11_PS_CS_UAV_REGISTER_COUNT-OM.UAVStartSlot, OM.UAVs, UAV_keepcounts);
+	
+	if(context->IsFL11_1())
+		context->OMSetRenderTargetsAndUnorderedAccessViews(OM.UAVStartSlot, OM.RenderTargets,
+															OM.DepthView,
+															OM.UAVStartSlot, D3D11_1_UAV_SLOT_COUNT-OM.UAVStartSlot, OM.UAVs, UAV_keepcounts);
+	else
+		context->OMSetRenderTargetsAndUnorderedAccessViews(OM.UAVStartSlot, OM.RenderTargets,
+															OM.DepthView,
+															OM.UAVStartSlot, D3D11_PS_CS_UAV_REGISTER_COUNT-OM.UAVStartSlot, OM.UAVs, UAV_keepcounts);
 }
 
-void D3D11RenderState::TakeRef(IUnknown *p)
+void D3D11RenderState::TakeRef(ID3D11DeviceChild *p)
 {
 	if(p)
 	{
@@ -863,11 +901,16 @@ void D3D11RenderState::TakeRef(IUnknown *p)
 				m_pDevice->InternalRef();
 
 			m_pDevice->InternalRef();
+
+			// we can use any specialisation of device child here, as all that is templated
+			// is the nested pointer type. Saves having another class in the inheritance
+			// heirarchy :(
+			((WrappedDeviceChild<ID3D11Buffer>*)p)->PipelineAddRef();
 		}
 	}
 }
 
-void D3D11RenderState::ReleaseRef(IUnknown *p)
+void D3D11RenderState::ReleaseRef(ID3D11DeviceChild *p)
 {
 	if(p)
 	{
@@ -881,37 +924,33 @@ void D3D11RenderState::ReleaseRef(IUnknown *p)
 				m_pDevice->InternalRelease();
 
 			m_pDevice->InternalRelease();
+
+			// see above
+			((WrappedDeviceChild<ID3D11Buffer>*)p)->PipelineRelease();
 		}
 	}
 }
 
 bool D3D11RenderState::IsBoundIUnknownForWrite(IUnknown *resource, bool readDepthOnly, bool readStencilOnly)
 {
-	const char *names[] = { "VS", "DS", "HS", "GS", "CS", "PS" };
-	shader *sh = &VS;
-	for(int s=0; s < 6; s++)
+	for(UINT i=0; i < D3D11_1_UAV_SLOT_COUNT; i++)
 	{
-		for(UINT i=0; i < D3D11_PS_CS_UAV_REGISTER_COUNT; i++)
+		bool found = false;
+		
+		ID3D11Resource *res = NULL;
+		if(CSUAVs[i])
 		{
-			bool found = false;
-			
-			ID3D11Resource *res = NULL;
-			if(sh->UAVs[i])
-			{
-				sh->UAVs[i]->GetResource(&res);
-				if(resource == (IUnknown *)res)
-					found = true;
-				SAFE_RELEASE(res);
-			}
-			
-			if(found || resource == (IUnknown *)sh->UAVs[i])
-			{
-				//RDCDEBUG("Resource was bound on %s UAV %u", names[s], i);
-				return true;
-			}
+			CSUAVs[i]->GetResource(&res);
+			if(resource == (IUnknown *)res)
+				found = true;
+			SAFE_RELEASE(res);
 		}
 		
-		sh++;
+		if(found || resource == (IUnknown *)CSUAVs[i])
+		{
+			//RDCDEBUG("Resource was bound on CS UAV %u", i);
+			return true;
+		}
 	}
 	
 	for(UINT i=0; i < D3D11_SO_BUFFER_SLOT_COUNT; i++)
@@ -943,7 +982,7 @@ bool D3D11RenderState::IsBoundIUnknownForWrite(IUnknown *resource, bool readDept
 		}
 	}
 
-	for(UINT i=0; i < D3D11_PS_CS_UAV_REGISTER_COUNT; i++)
+	for(UINT i=0; i < D3D11_1_UAV_SLOT_COUNT; i++)
 	{
 		bool found = false;
 
@@ -1010,30 +1049,24 @@ bool D3D11RenderState::IsBoundIUnknownForWrite(IUnknown *resource, bool readDept
 
 void D3D11RenderState::UnbindIUnknownForWrite(IUnknown *resource)
 {
-	shader *sh = &VS;
-	for(int s=0; s < 6; s++)
+	for(UINT i=0; i < D3D11_1_UAV_SLOT_COUNT; i++)
 	{
-		for(UINT i=0; i < D3D11_PS_CS_UAV_REGISTER_COUNT; i++)
+		bool found = false;
+		
+		ID3D11Resource *res = NULL;
+		if(CSUAVs[i])
 		{
-			bool found = false;
-			
-			ID3D11Resource *res = NULL;
-			if(sh->UAVs[i])
-			{
-				sh->UAVs[i]->GetResource(&res);
-				if(resource == (IUnknown *)res)
-					found = true;
-				SAFE_RELEASE(res);
-			}
-			
-			if(found || resource == (IUnknown *)sh->UAVs[i])
-			{
-				ReleaseRef(sh->UAVs[i]);
-				sh->UAVs[i] = NULL;
-			}
+			CSUAVs[i]->GetResource(&res);
+			if(resource == (IUnknown *)res)
+				found = true;
+			SAFE_RELEASE(res);
 		}
 		
-		sh++;
+		if(found || resource == (IUnknown *)CSUAVs[i])
+		{
+			ReleaseRef(CSUAVs[i]);
+			CSUAVs[i] = NULL;
+		}
 	}
 	
 	for(UINT i=0; i < D3D11_SO_BUFFER_SLOT_COUNT; i++)
@@ -1065,7 +1098,7 @@ void D3D11RenderState::UnbindIUnknownForWrite(IUnknown *resource)
 		}
 	}
 
-	for(UINT i=0; i < D3D11_PS_CS_UAV_REGISTER_COUNT; i++)
+	for(UINT i=0; i < D3D11_1_UAV_SLOT_COUNT; i++)
 	{
 		bool found = false;
 

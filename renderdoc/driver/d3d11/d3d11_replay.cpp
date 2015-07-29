@@ -32,7 +32,7 @@
 
 #include <d3dcompiler.h>
 
-#include "shaders/dxbc_debug.h"
+#include "driver/shaders/dxbc/dxbc_debug.h"
 
 #include "serialise/string_utils.h"
 
@@ -45,6 +45,10 @@ D3D11Replay::D3D11Replay()
 
 void D3D11Replay::Shutdown()
 {
+	for(size_t i=0; i < m_ProxyResources.size(); i++)
+		m_ProxyResources[i]->Release();
+	m_ProxyResources.clear();
+
 	m_pDevice->Release();
 	
 	D3D11DebugManager::PostDeviceShutdownCounters();
@@ -296,9 +300,10 @@ ShaderReflection *D3D11Replay::GetShader(ResourceId id)
 	if(it == WrappedShader::m_ShaderList.end())
 		return NULL;
 
-	RDCASSERT(it->second.m_Details);
+	ShaderReflection *ret = it->second->GetDetails();
+	RDCASSERT(ret);
 
-	return it->second.m_Details;
+	return ret;
 }
 
 void D3D11Replay::FreeTargetResource(ResourceId id)
@@ -665,20 +670,20 @@ D3D11PipelineState D3D11Replay::MakePipelineState()
 				}
 			}
 
-			create_array_uninit(dst.UAVs, D3D11_PS_CS_UAV_REGISTER_COUNT);
-			for(size_t s=0; s < D3D11_PS_CS_UAV_REGISTER_COUNT; s++)
+			create_array(dst.UAVs, D3D11_1_UAV_SLOT_COUNT);
+			for(size_t s=0; dst.stage == eShaderStage_Compute && s < D3D11_1_UAV_SLOT_COUNT; s++)
 			{
 				D3D11PipelineState::ShaderStage::ResourceView &view = dst.UAVs[s];
 
-				view.View = rm->GetOriginalID(GetIDForResource(src.UAVs[s]));
+				view.View = rm->GetOriginalID(GetIDForResource(rs->CSUAVs[s]));
 
 				if(view.View != ResourceId())
 				{
 					D3D11_UNORDERED_ACCESS_VIEW_DESC desc;
-					src.UAVs[s]->GetDesc(&desc);
+					rs->CSUAVs[s]->GetDesc(&desc);
 
 					ID3D11Resource *res = NULL;
-					src.UAVs[s]->GetResource(&res);
+					rs->CSUAVs[s]->GetResource(&res);
 					
 					view.Structured = false;
 					view.BufferStructCount = 0;
@@ -687,7 +692,7 @@ D3D11PipelineState D3D11Replay::MakePipelineState()
 						(desc.Buffer.Flags & (D3D11_BUFFER_UAV_FLAG_APPEND|D3D11_BUFFER_UAV_FLAG_COUNTER)))
 					{
 						view.Structured = true;
-						view.BufferStructCount = m_pDevice->GetDebugManager()->GetStructCount(src.UAVs[s]);
+						view.BufferStructCount = m_pDevice->GetDebugManager()->GetStructCount(rs->CSUAVs[s]);
 					}
 
 					view.Resource = rm->GetOriginalID(GetIDForResource(res));
@@ -916,8 +921,8 @@ D3D11PipelineState D3D11Replay::MakePipelineState()
 
 		ret.m_OM.UAVStartSlot = rs->OM.UAVStartSlot;
 		
-		create_array_uninit(ret.m_OM.UAVs, D3D11_PS_CS_UAV_REGISTER_COUNT);
-		for(size_t s=0; s < D3D11_PS_CS_UAV_REGISTER_COUNT; s++)
+		create_array_uninit(ret.m_OM.UAVs, D3D11_1_UAV_SLOT_COUNT);
+		for(size_t s=0; s < D3D11_1_UAV_SLOT_COUNT; s++)
 		{
 			D3D11PipelineState::ShaderStage::ResourceView view;
 
@@ -1344,18 +1349,18 @@ void D3D11Replay::FillCBufferVariables(ResourceId shader, uint32_t cbufSlot, vec
 	if(it == WrappedShader::m_ShaderList.end())
 		return;
 
-	RDCASSERT(it->second.m_DXBCFile);
+	DXBC::DXBCFile *dxbc = it->second->GetDXBC();
 
-	DXBC::DXBCFile *dxbc = it->second.m_DXBCFile;
+	RDCASSERT(dxbc);
 
 	if(cbufSlot < dxbc->m_CBuffers.size())
 		m_pDevice->GetDebugManager()->FillCBufferVariables(dxbc->m_CBuffers[cbufSlot].variables, outvars, false, data);
 	return;
 }
 
-vector<PixelModification> D3D11Replay::PixelHistory(uint32_t frameID, vector<EventUsage> events, ResourceId target, uint32_t x, uint32_t y, uint32_t sampleIdx)
+vector<PixelModification> D3D11Replay::PixelHistory(uint32_t frameID, vector<EventUsage> events, ResourceId target, uint32_t x, uint32_t y, uint32_t slice, uint32_t mip, uint32_t sampleIdx)
 {
-	return m_pDevice->GetDebugManager()->PixelHistory(frameID, events, target, x, y, sampleIdx);
+	return m_pDevice->GetDebugManager()->PixelHistory(frameID, events, target, x, y, slice, mip, sampleIdx);
 }
 
 ShaderDebugTrace D3D11Replay::DebugVertex(uint32_t frameID, uint32_t eventID, uint32_t vertid, uint32_t instid, uint32_t idx, uint32_t instOffset, uint32_t vertOffset)
@@ -1371,6 +1376,11 @@ ShaderDebugTrace D3D11Replay::DebugPixel(uint32_t frameID, uint32_t eventID, uin
 ShaderDebugTrace D3D11Replay::DebugThread(uint32_t frameID, uint32_t eventID, uint32_t groupid[3], uint32_t threadid[3])
 {
 	return m_pDevice->GetDebugManager()->DebugThread(frameID, eventID, groupid, threadid);
+}
+
+uint32_t D3D11Replay::PickVertex(uint32_t frameID, uint32_t eventID, MeshDisplay cfg, uint32_t x, uint32_t y)
+{
+	return m_pDevice->GetDebugManager()->PickVertex(frameID, eventID, cfg, x, y);
 }
 
 void D3D11Replay::PickPixel(ResourceId texture, uint32_t x, uint32_t y, uint32_t sliceFace, uint32_t mip, uint32_t sample, float pixel[4])
@@ -1541,6 +1551,8 @@ ResourceId D3D11Replay::CreateProxyTexture(FetchTexture templateTex)
 		SetDebugName(resource, templateTex.name.elems);
 	}
 
+	m_ProxyResources.push_back(resource);
+
 	return ret;
 }
 
@@ -1687,6 +1699,8 @@ ResourceId D3D11Replay::CreateProxyBuffer(FetchBuffer templateBuf)
 		string name = templateBuf.name.elems;
 		SetDebugName(resource, templateBuf.name.elems);
 	}
+
+	m_ProxyResources.push_back(resource);
 
 	return ret;
 }

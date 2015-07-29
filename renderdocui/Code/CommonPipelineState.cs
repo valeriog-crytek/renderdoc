@@ -338,6 +338,7 @@ namespace renderdocui.Code
             public int InstanceRate;
             public ResourceFormat Format;
             public object[] GenericValue;
+            public bool Used;
         };
 
         public VertexInputAttribute[] GetVertexInputs()
@@ -380,6 +381,20 @@ namespace renderdocui.Code
                         ret[i].InstanceRate = (int)layouts[i].InstanceDataStepRate;
                         ret[i].Format = layouts[i].Format;
                         ret[i].GenericValue = null;
+                        ret[i].Used = false;
+
+                        if (m_D3D11.m_IA.Bytecode != null)
+                        {
+                            for (int ia = 0; ia < m_D3D11.m_IA.Bytecode.InputSig.Length; ia++)
+                            {
+                                if (m_D3D11.m_IA.Bytecode.InputSig[ia].semanticName.ToUpperInvariant() == layouts[i].SemanticName.ToUpperInvariant() &&
+                                    m_D3D11.m_IA.Bytecode.InputSig[ia].semanticIndex == layouts[i].SemanticIndex)
+                                {
+                                    ret[i].Used = true;
+                                    break;
+                                }
+                            }
+                        }
                     }
 
                     return ret;
@@ -412,6 +427,7 @@ namespace renderdocui.Code
                         ret[a].PerInstance = m_GL.m_VtxIn.vbuffers[attrs[i].BufferSlot].Divisor > 0;
                         ret[a].InstanceRate = (int)m_GL.m_VtxIn.vbuffers[attrs[i].BufferSlot].Divisor;
                         ret[a].Format = attrs[i].Format;
+                        ret[a].Used = true;
 
                         if (m_GL.m_VS.BindpointMapping != null && m_GL.m_VS.ShaderDetails != null)
                         {
@@ -569,7 +585,7 @@ namespace renderdocui.Code
                 if (IsLogD3D11)
                     return m_D3D11.m_OM.DepthTarget.Resource;
                 else if (IsLogGL)
-                    return m_GL.m_FB.m_DrawFBO.Depth;
+                    return m_GL.m_FB.m_DrawFBO.Depth.Obj;
             }
 
             return ResourceId.Null;
@@ -582,7 +598,7 @@ namespace renderdocui.Code
                 if (IsLogD3D11)
                     return m_D3D11.m_OM.DepthTarget.Resource;
                 else if (IsLogGL)
-                    return m_GL.m_FB.m_DrawFBO.Stencil;
+                    return m_GL.m_FB.m_DrawFBO.Stencil.Obj;
             }
 
             return ResourceId.Null;
@@ -632,7 +648,7 @@ namespace renderdocui.Code
                     {
                         int db = m_GL.m_FB.m_DrawFBO.DrawBuffers[i];
                         if(db >= 0)
-                            ret[i] = m_GL.m_FB.m_DrawFBO.Color[db];
+                            ret[i] = m_GL.m_FB.m_DrawFBO.Color[db].Obj;
                     }
 
                     return ret;
@@ -652,7 +668,7 @@ namespace renderdocui.Code
                         return m_D3D11.m_OM.DepthTarget.Resource;
 
                     if (IsLogGL)
-                        return m_GL.m_FB.m_DrawFBO.Depth;
+                        return m_GL.m_FB.m_DrawFBO.Depth.Obj;
                 }
 
                 return ResourceId.Null;
@@ -669,7 +685,7 @@ namespace renderdocui.Code
                         return m_D3D11.m_OM.DepthTarget.Resource;
 
                     if (IsLogGL)
-                        return m_GL.m_FB.m_DrawFBO.Stencil;
+                        return m_GL.m_FB.m_DrawFBO.Stencil.Obj;
                 }
 
                 return ResourceId.Null;

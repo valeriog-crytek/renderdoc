@@ -1071,8 +1071,15 @@ namespace renderdocui.Windows
 
             CloseLogfile();
 
-            if (deletepath.Length > 0)
-                File.Delete(deletepath);
+            try
+            {
+                if (deletepath.Length > 0)
+                    File.Delete(deletepath);
+            }
+            catch (System.Exception)
+            {
+                // can't delete it! maybe already deleted?
+            }
 
             return true;
         }
@@ -1090,9 +1097,17 @@ namespace renderdocui.Windows
                     return false;
                 }
 
-                // we copy the (possibly) temp log to the desired path, but the log item remains referring to the original path.
-                // This ensures that if the user deletes the saved path we can still open or re-save it.
-                File.Copy(m_Core.LogFileName, saveDialog.FileName, true);
+                try
+                {
+                    // we copy the (possibly) temp log to the desired path, but the log item remains referring to the original path.
+                    // This ensures that if the user deletes the saved path we can still open or re-save it.
+                    File.Copy(m_Core.LogFileName, saveDialog.FileName, true);
+                }
+                catch (System.Exception ex)
+                {
+                    MessageBox.Show("Couldn't save to " + saveDialog.FileName + Environment.NewLine + ex.ToString(), "Cannot save",
+                                                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
 
                 // we don't prompt to save on closing - if the user deleted the log that we just saved, then
                 // that is up to them.
@@ -1102,6 +1117,32 @@ namespace renderdocui.Windows
             }
 
             return false;
+        }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            // bookmark keys are handled globally
+            if ((keyData & Keys.Control) == Keys.Control)
+            {
+                Keys[] digits = { Keys.D1, Keys.D2, Keys.D3, Keys.D4, Keys.D5,
+                                  Keys.D6, Keys.D7, Keys.D8, Keys.D9, Keys.D0 };
+
+                for (int i = 0; i < digits.Length; i++)
+                {
+                    if (keyData == (Keys.Control|digits[i]))
+                    {
+                        EventBrowser eb = m_Core.GetEventBrowser();
+
+                        if (eb.Visible && eb.HasBookmark(i))
+                        {
+                            m_Core.SetEventID(null, m_Core.CurFrame, eb.GetBookmark(i));
+
+                            return true;
+                        }
+                    }
+                }
+            }
+            return base.ProcessCmdKey(ref msg, keyData);
         }
 
         private void MainWindow_FormClosing(object sender, FormClosingEventArgs e)

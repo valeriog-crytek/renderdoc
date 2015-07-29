@@ -1324,7 +1324,7 @@ namespace renderdocui.Windows.PipelineState
                 {
                     ResourceId p = ResourceId.Null;
 
-                    if (db >= 0) p = state.m_FB.m_DrawFBO.Color[db];
+                    if (db >= 0) p = state.m_FB.m_DrawFBO.Color[db].Obj;
 
                     if (p != ResourceId.Null || showEmpty.Checked)
                     {
@@ -1384,7 +1384,7 @@ namespace renderdocui.Windows.PipelineState
 
             {
                 int i = 0;
-                foreach (ResourceId depthstencil in new ResourceId[] { state.m_FB.m_DrawFBO.Depth, state.m_FB.m_DrawFBO.Stencil })
+                foreach (ResourceId depthstencil in new ResourceId[] { state.m_FB.m_DrawFBO.Depth.Obj, state.m_FB.m_DrawFBO.Stencil.Obj })
                 {
                     if (depthstencil != ResourceId.Null || showEmpty.Checked)
                     {
@@ -1673,6 +1673,65 @@ namespace renderdocui.Windows.PipelineState
             }
         }
 
+        private void defaultCopyPaste_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (!m_Core.LogLoaded) return;
+
+            if (e.KeyCode == Keys.C && e.Control)
+            {
+                string text = "";
+
+                if (sender is DataGridView)
+                {
+                    foreach (DataGridViewRow row in ((DataGridView)sender).SelectedRows)
+                    {
+                        foreach (var cell in row.Cells)
+                            text += cell.ToString() + " ";
+                        text += Environment.NewLine;
+                    }
+                }
+                else if (sender is TreelistView.TreeListView)
+                {
+                    TreelistView.NodesSelection sel = ((TreelistView.TreeListView)sender).NodesSelection;
+
+                    if (sel.Count > 0)
+                    {
+                        for (int i = 0; i < sel.Count; i++)
+                        {
+                            for (int v = 0; v < sel[i].Count; v++)
+                                text += sel[i][v].ToString() + " ";
+                            text += Environment.NewLine;
+                        }
+                    }
+                    else
+                    {
+                        TreelistView.Node n = ((TreelistView.TreeListView)sender).SelectedNode;
+                        for (int v = 0; v < n.Count; v++)
+                            text += n[v].ToString() + " ";
+                        text += Environment.NewLine;
+                    }
+                }
+
+                try
+                {
+                    if (text.Length > 0)
+                        Clipboard.SetText(text);
+                }
+                catch (System.Exception)
+                {
+                    try
+                    {
+                        if (text.Length > 0)
+                            Clipboard.SetDataObject(text);
+                    }
+                    catch (System.Exception)
+                    {
+                        // give up!
+                    }
+                }
+            }
+        }
+
         private void disableSelection_Leave(object sender, EventArgs e)
         {
             if (sender is DataGridView)
@@ -1813,7 +1872,7 @@ namespace renderdocui.Windows.PipelineState
 
             var files = new Dictionary<string, string>();
             foreach (var s in shaderDetails.DebugInfo.files)
-                files.Add(Path.GetFileName(s.filename), s.filetext);
+                files.Add(s.BaseFilename, s.filetext);
 
             if (files.Count == 0)
                 return;
@@ -1823,7 +1882,9 @@ namespace renderdocui.Windows.PipelineState
             // Save Callback
             (ShaderViewer viewer, Dictionary<string, string> updatedfiles) =>
             {
-                string compileSource = updatedfiles.First().Value;
+                string compileSource = "";
+                foreach (var kv in updatedfiles)
+                    compileSource += kv.Value;
 
                 // invoke off to the ReplayRenderer to replace the log's shader
                 // with our edited one

@@ -254,6 +254,31 @@ class ProxySerialiser : public IReplayDriver, Callstack::StackResolver
 				m_Proxy->RenderMesh(frameID, eventID, secDraws, cfg);
 			}
 		}
+
+		uint32_t PickVertex(uint32_t frameID, uint32_t eventID, MeshDisplay cfg, uint32_t x, uint32_t y)
+		{
+			if(m_Proxy && cfg.position.buf != ResourceId())
+			{
+				EnsureBufCached(cfg.position.buf);
+				cfg.position.buf = m_ProxyBufferIds[cfg.position.buf];
+
+				if(cfg.second.buf != ResourceId())
+				{
+					EnsureBufCached(cfg.second.buf);
+					cfg.second.buf = m_ProxyBufferIds[cfg.second.buf];
+				}
+
+				if(cfg.position.idxbuf != ResourceId())
+				{
+					EnsureBufCached(cfg.position.idxbuf);
+					cfg.position.idxbuf = m_ProxyBufferIds[cfg.position.idxbuf];
+				}
+
+				return m_Proxy->PickVertex(frameID, eventID, cfg, x, y);
+			}
+
+			return ~0U;
+		}
 		
 		void BuildCustomShader(string source, string entry, const uint32_t compileFlags, ShaderStageType type, ResourceId *id, string *errors)
 		{
@@ -339,7 +364,7 @@ class ProxySerialiser : public IReplayDriver, Callstack::StackResolver
 		
 		void FreeTargetResource(ResourceId id);
 			
-		vector<PixelModification> PixelHistory(uint32_t frameID, vector<EventUsage> events, ResourceId target, uint32_t x, uint32_t y, uint32_t sampleIdx);
+		vector<PixelModification> PixelHistory(uint32_t frameID, vector<EventUsage> events, ResourceId target, uint32_t x, uint32_t y, uint32_t slice, uint32_t mip, uint32_t sampleIdx);
 		ShaderDebugTrace DebugVertex(uint32_t frameID, uint32_t eventID, uint32_t vertid, uint32_t instid, uint32_t idx, uint32_t instOffset, uint32_t vertOffset);
 		ShaderDebugTrace DebugPixel(uint32_t frameID, uint32_t eventID, uint32_t x, uint32_t y, uint32_t sample, uint32_t primitive);
 		ShaderDebugTrace DebugThread(uint32_t frameID, uint32_t eventID, uint32_t groupid[3], uint32_t threadid[3]);
@@ -347,6 +372,8 @@ class ProxySerialiser : public IReplayDriver, Callstack::StackResolver
 		void BuildTargetShader(string source, string entry, const uint32_t compileFlags, ShaderStageType type, ResourceId *id, string *errors);
 		void ReplaceResource(ResourceId from, ResourceId to);
 		void RemoveReplacement(ResourceId id);
+
+		void FileChanged() {}
 
 		// will never be used
 		ResourceId CreateProxyTexture(FetchTexture templateTex)

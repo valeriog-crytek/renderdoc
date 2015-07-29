@@ -37,7 +37,7 @@
 
 struct ReplayRenderer;
 
-struct ReplayOutput
+struct ReplayOutput : public IReplayOutput
 {
 public:
 	bool SetOutputConfig(const OutputConfig &o);
@@ -58,9 +58,10 @@ public:
 	bool PickPixel(ResourceId texID, bool customShader, 
 					uint32_t x, uint32_t y, uint32_t sliceFace, uint32_t mip, uint32_t sample,
 					PixelValue *val);
+	uint32_t PickVertex(uint32_t frameID, uint32_t eventID, uint32_t x, uint32_t y);
 private:
 	ReplayOutput(ReplayRenderer *parent, void *w);
-	~ReplayOutput();
+	virtual ~ReplayOutput();
 	
 	void SetFrameEvent(int frameID, int eventID);
 	void SetContextFilter(ResourceId id, uint32_t firstDefEv, uint32_t lastDefEv);
@@ -122,17 +123,19 @@ private:
 	friend struct ReplayRenderer;
 };
 
-struct ReplayRenderer
+struct ReplayRenderer : public IReplayRenderer
 {
 	public:
 		ReplayRenderer();
-		~ReplayRenderer();
+		virtual ~ReplayRenderer();
 
 		APIProperties GetAPIProperties();
 
 		ReplayCreateStatus CreateDevice(const char *logfile);
 		ReplayCreateStatus SetDevice(IReplayDriver *device);
-		
+
+		void FileChanged();
+
 		bool HasCallstacks();
 		bool InitResolver();
 		
@@ -164,7 +167,7 @@ struct ReplayRenderer
 		ShaderReflection *GetShaderDetails(ResourceId shader);
 		bool GetDebugMessages(rdctype::array<DebugMessage> *msgs);
 		
-		bool PixelHistory(ResourceId target, uint32_t x, uint32_t y, uint32_t sampleIdx, rdctype::array<PixelModification> *history);
+		bool PixelHistory(ResourceId target, uint32_t x, uint32_t y, uint32_t slice, uint32_t mip, uint32_t sampleIdx, rdctype::array<PixelModification> *history);
 		bool DebugVertex(uint32_t vertid, uint32_t instid, uint32_t idx, uint32_t instOffset, uint32_t vertOffset, ShaderDebugTrace *trace);
 		bool DebugPixel(uint32_t x, uint32_t y, uint32_t sample, uint32_t primitive, ShaderDebugTrace *trace);
 		bool DebugThread(uint32_t groupid[3], uint32_t threadid[3], ShaderDebugTrace *trace);
@@ -184,6 +187,9 @@ struct ReplayRenderer
 		bool GetCBufferVariableContents(ResourceId shader, uint32_t cbufslot, ResourceId buffer, uint32_t offs, rdctype::array<ShaderVariable> *vars);
 	
 		ReplayOutput *CreateOutput(void *handle);
+
+		void ShutdownOutput(ReplayOutput *output);
+		void Shutdown();
 	private:
 		ReplayCreateStatus PostCreateInit(IReplayDriver *device);
 		

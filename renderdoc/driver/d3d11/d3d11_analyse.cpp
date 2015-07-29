@@ -24,10 +24,12 @@
 
 
 #include "maths/vec.h"
+#include "maths/matrix.h"
+#include "maths/camera.h"
 #include "d3d11_manager.h"
 #include "d3d11_context.h"
 #include "d3d11_debug.h"
-#include "shaders/dxbc_debug.h"
+#include "driver/shaders/dxbc/dxbc_debug.h"
 #include "maths/formatpacking.h"
 #include "data/resource.h"
 #include "serialise/serialiser.h"
@@ -506,7 +508,7 @@ ShaderDebug::State D3D11DebugManager::CreateShaderDebugState(ShaderDebugTrace &t
 
 void D3D11DebugManager::CreateShaderGlobalState(ShaderDebug::GlobalState &global, DXBC::DXBCFile *dxbc, uint32_t UAVStartSlot, ID3D11UnorderedAccessView **UAVs, ID3D11ShaderResourceView **SRVs)
 {
-	for(int i=0; UAVs != NULL && i+UAVStartSlot < D3D11_PS_CS_UAV_REGISTER_COUNT; i++)
+	for(int i=0; UAVs != NULL && i+UAVStartSlot < D3D11_1_UAV_SLOT_COUNT; i++)
 	{
 		int dsti = i+UAVStartSlot;
 		if(UAVs[i])
@@ -570,7 +572,7 @@ void D3D11DebugManager::CreateShaderGlobalState(ShaderDebug::GlobalState &global
 			{
 				if(WrappedID3D11Buffer::IsAlloc(res))
 				{
-					global.uavs[dsti].data = GetBufferData((ID3D11Buffer *)res, 0, 0);
+					global.uavs[dsti].data = GetBufferData((ID3D11Buffer *)res, 0, 0, true);
 				}
 				else
 				{
@@ -753,7 +755,7 @@ void D3D11DebugManager::CreateShaderGlobalState(ShaderDebug::GlobalState &global
 			{
 				if(WrappedID3D11Buffer::IsAlloc(res))
 				{
-					global.srvs[i].data = GetBufferData((ID3D11Buffer *)res, 0, 0);
+					global.srvs[i].data = GetBufferData((ID3D11Buffer *)res, 0, 0, true);
 				}
 			}
 
@@ -878,8 +880,8 @@ ShaderDebugTrace D3D11DebugManager::DebugVertex(uint32_t frameID, uint32_t event
 		UINT i = *it;
 		if(rs->IA.VBs[i])
 		{
-			vertData[i] = GetBufferData(rs->IA.VBs[i], rs->IA.Offsets[i] + rs->IA.Strides[i]*(vertOffset+idx), rs->IA.Strides[i]);
-			instData[i] = GetBufferData(rs->IA.VBs[i], rs->IA.Offsets[i] + rs->IA.Strides[i]*(instOffset+instid), rs->IA.Strides[i]);
+			vertData[i] = GetBufferData(rs->IA.VBs[i], rs->IA.Offsets[i] + rs->IA.Strides[i]*(vertOffset+idx), rs->IA.Strides[i], true);
+			instData[i] = GetBufferData(rs->IA.VBs[i], rs->IA.Offsets[i] + rs->IA.Strides[i]*(instOffset+instid), rs->IA.Strides[i], true);
 		}
 	}
 
@@ -887,7 +889,7 @@ ShaderDebugTrace D3D11DebugManager::DebugVertex(uint32_t frameID, uint32_t event
 
 	for(int i=0; i < D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT; i++)
 		if(rs->VS.ConstantBuffers[i])
-			cbufData[i] = GetBufferData(rs->VS.ConstantBuffers[i], rs->VS.CBOffsets[i]*sizeof(Vec4f), 0);
+			cbufData[i] = GetBufferData(rs->VS.ConstantBuffers[i], rs->VS.CBOffsets[i]*sizeof(Vec4f), 0, true);
 
 	ShaderDebugTrace ret;
 	
@@ -1225,6 +1227,7 @@ ShaderDebugTrace D3D11DebugManager::DebugPixel(uint32_t frameID, uint32_t eventI
 	}
 
 	vector<string> floatInputs;
+	vector< pair<string, pair<uint32_t, uint32_t> > > arrays; // name, pair<start semantic index, end semantic index>
 
 	uint32_t nextreg = 0;
 
@@ -1242,6 +1245,20 @@ ShaderDebugTrace D3D11DebugManager::DebugPixel(uint32_t frameID, uint32_t eventI
 		{
 			extractHlsl += "//";
 			included = false;
+		}
+
+		bool arrayElem = false;
+
+		for(size_t a=0; a < arrays.size(); a++)
+		{
+			if(arrays[a].first == dxbc->m_InputSig[i].semanticName.elems &&
+				arrays[a].second.first <= dxbc->m_InputSig[i].semanticIndex &&
+				arrays[a].second.second >= dxbc->m_InputSig[i].semanticIndex)
+			{
+				extractHlsl += "//";
+				included = false;
+				arrayElem = true;
+			}
 		}
 
 		int missingreg = int(dxbc->m_InputSig[i].regIndex) - int(nextreg);
@@ -1319,11 +1336,79 @@ ShaderDebugTrace D3D11DebugManager::DebugPixel(uint32_t frameID, uint32_t eventI
 			structureStride += 4*numCols;
 
 		string name = dxbc->m_InputSig[i].semanticIdxName.elems;
+
+		// arrays of interpolators are handled really weirdly. They use cbuffer
+		// packing rules where each new value is in a new register (rather than
+		// e.g. 2 x float2 in a single register), but that's pointless because
+		// you can't dynamically index into input registers.
+		// If we declare those elements as a non-array, the float2s or floats
+		// will be packed into registers and won't match up to the previous
+		// shader.
+		// HOWEVER to add an extra bit of fun, fxc will happily pack other
+		// parameters not in the array into spare parts of the registers.
+		//
+		// So I think the upshot is that we can detect arrays reliably by
+		// whenever we encounter a float or float2 at the start of a register,
+		// search forward to see if the next register has an element that is the
+		// same semantic name and one higher semantic index. If so, there's an
+		// array, so keep searching to enumerate its length.
+		// I think this should be safe if the packing just happens to place those
+		// registers together.
+
+		int arrayLength = 0;
+
+		if(included && numCols <= 2 && dxbc->m_InputSig[i].regChannelMask <= 0x3)
+		{
+			uint32_t nextIdx = dxbc->m_InputSig[i].semanticIndex+1;
+
+			for(size_t j=i+1; j < dxbc->m_InputSig.size(); j++)
+			{
+				// if we've found the 'next' semantic
+				if(!strcmp(dxbc->m_InputSig[i].semanticName.elems, dxbc->m_InputSig[j].semanticName.elems) &&
+					nextIdx == dxbc->m_InputSig[j].semanticIndex)
+				{
+					int jNumCols = 
+						(dxbc->m_InputSig[i].regChannelMask & 0x1 ? 1 : 0) +
+						(dxbc->m_InputSig[i].regChannelMask & 0x2 ? 1 : 0) +
+						(dxbc->m_InputSig[i].regChannelMask & 0x4 ? 1 : 0) +
+						(dxbc->m_InputSig[i].regChannelMask & 0x8 ? 1 : 0);
+
+					// if it's the same size, and it's at the start of the next register
+					if(jNumCols == numCols && dxbc->m_InputSig[j].regChannelMask <= 0x3)
+					{
+						if(arrayLength == 0)
+							arrayLength = 2;
+						else
+							arrayLength++;
+
+						// continue searching now
+						nextIdx++;
+						j = i+1; continue;
+					}
+				}
+			}
+
+			if(arrayLength > 0)
+				arrays.push_back(std::make_pair(dxbc->m_InputSig[i].semanticName.elems, std::make_pair(dxbc->m_InputSig[i].semanticIndex, nextIdx-1)));
+		}
+
+		extractHlsl += ToStr::Get((uint32_t)numCols) + " input_" + name;
+		if(arrayLength > 0)
+			extractHlsl += "[" + ToStr::Get(arrayLength) + "]";
+		extractHlsl += " : " + name;
 		
-		extractHlsl += ToStr::Get((uint32_t)numCols) + " input_" + name + " : " + name;
-		
-		if(dxbc->m_InputSig[i].compType == eCompType_Float)
-			floatInputs.push_back("input_" + name);
+		if(included && dxbc->m_InputSig[i].compType == eCompType_Float)
+		{
+			if(arrayLength == 0)
+			{
+				floatInputs.push_back("input_" + name);
+			}
+			else
+			{
+				for(int a=0; a < arrayLength; a++)
+					floatInputs.push_back("input_" + name + "[" + ToStr::Get(a) + "]");
+			}
+		}
 
 		extractHlsl += ";\n";
 		
@@ -1334,7 +1419,22 @@ ShaderDebugTrace D3D11DebugManager::DebugPixel(uint32_t frameID, uint32_t eventI
 			dxbc->m_InputSig[i].regChannelMask & 0x8 ? 3 :
 			-1;
 
-		initialValues.push_back(DataOutput(dxbc->m_InputSig[i].regIndex, firstElem, numCols, dxbc->m_InputSig[i].systemValue, included));
+		// arrays get added all at once (because in the struct data, they are contiguous even if
+		// in the input signature they're not).
+		if(!arrayElem)
+		{
+			if(arrayLength == 0)
+			{
+				initialValues.push_back(DataOutput(dxbc->m_InputSig[i].regIndex, firstElem, numCols, dxbc->m_InputSig[i].systemValue, included));
+			}
+			else
+			{
+				for(int a=0; a < arrayLength; a++)
+				{
+					initialValues.push_back(DataOutput(dxbc->m_InputSig[i].regIndex + a, firstElem, numCols, dxbc->m_InputSig[i].systemValue, included));
+				}
+			}
+		}
 	}
 
 	extractHlsl += "};\n\n";
@@ -1351,7 +1451,7 @@ ShaderDebugTrace D3D11DebugManager::DebugPixel(uint32_t frameID, uint32_t eventI
 	if(rtView != NULL)
 		uavslot = 1;
 
-	extractHlsl += "struct PSInitialData { uint hit; float3 pos; uint prim; uint fface; uint sample; uint covge; float derivValid; PSInput IN; PSInput INddx; PSInput INddy; };\n\n";
+	extractHlsl += "struct PSInitialData { uint hit; float3 pos; uint prim; uint fface; uint sample; uint covge; float derivValid; PSInput IN; PSInput INddx; PSInput INddy; PSInput INddxfine; PSInput INddyfine; };\n\n";
 	extractHlsl += "RWStructuredBuffer<PSInitialData> PSInitialBuffer : register(u" + ToStr::Get(uavslot) + ");\n\n";
 	extractHlsl += "void ExtractInputsPS(PSInput IN, float4 debug_pixelPos : SV_Position, uint prim : SV_PrimitiveID, uint sample : SV_SampleIndex, uint covge : SV_Coverage, bool fface : SV_IsFrontFace)\n{\n";
 	extractHlsl += "  uint idx = " + ToStr::Get(overdrawLevels) + ";\n";
@@ -1367,11 +1467,16 @@ ShaderDebugTrace D3D11DebugManager::DebugPixel(uint32_t frameID, uint32_t eventI
 	extractHlsl += "  PSInitialBuffer[idx].derivValid = ddx(debug_pixelPos.x);\n";
 	extractHlsl += "  PSInitialBuffer[idx].INddx = (PSInput)0;\n";
 	extractHlsl += "  PSInitialBuffer[idx].INddy = (PSInput)0;\n";
+	extractHlsl += "  PSInitialBuffer[idx].INddxfine = (PSInput)0;\n";
+	extractHlsl += "  PSInitialBuffer[idx].INddyfine = (PSInput)0;\n";
+
 	for(size_t i=0; i < floatInputs.size(); i++)
 	{
 		const string &name = floatInputs[i];
 		extractHlsl += "  PSInitialBuffer[idx].INddx." + name + " = ddx(IN." + name + ");\n";
 		extractHlsl += "  PSInitialBuffer[idx].INddy." + name + " = ddy(IN." + name + ");\n";
+		extractHlsl += "  PSInitialBuffer[idx].INddxfine." + name + " = ddx_fine(IN." + name + ");\n";
+		extractHlsl += "  PSInitialBuffer[idx].INddyfine." + name + " = ddy_fine(IN." + name + ");\n";
 	}
 	extractHlsl += "\n}";
 
@@ -1384,7 +1489,7 @@ ShaderDebugTrace D3D11DebugManager::DebugPixel(uint32_t frameID, uint32_t eventI
 												+ sizeof(uint32_t)    // uint sample;
 												+ sizeof(uint32_t)    // uint covge;
 												+ sizeof(float)       // float derivValid;
-												+ structureStride*3;  // PSInput IN, INddx, INddy;
+												+ structureStride*5;  // PSInput IN, INddx, INddy, INddxfine, INddyfine;
 
 	HRESULT hr = S_OK;
 	
@@ -1488,6 +1593,7 @@ ShaderDebugTrace D3D11DebugManager::DebugPixel(uint32_t frameID, uint32_t eventI
 	State quad[4];
 
 	// figure out the TL pixel's coords. Assume even top left (towards 0,0)
+	// this isn't spec'd but is a reasonable assumption.
 	int xTL = x&(~1);
 	int yTL = y&(~1);
 
@@ -1498,7 +1604,7 @@ ShaderDebugTrace D3D11DebugManager::DebugPixel(uint32_t frameID, uint32_t eventI
 
 	for(int i=0; i < D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT; i++)
 		if(rs->PS.ConstantBuffers[i])
-			cbufData[i] = GetBufferData(rs->PS.ConstantBuffers[i], rs->PS.CBOffsets[i]*sizeof(Vec4f), 0);
+			cbufData[i] = GetBufferData(rs->PS.ConstantBuffers[i], rs->PS.CBOffsets[i]*sizeof(Vec4f), 0, true);
 
 	D3D11_COMPARISON_FUNC depthFunc = D3D11_COMPARISON_LESS;
 
@@ -1634,6 +1740,32 @@ ShaderDebugTrace D3D11DebugManager::DebugPixel(uint32_t frameID, uint32_t eventI
 				quad[i].SetHelper();
 		}
 
+		// We make the assumption that the coarse derivatives are
+		// generated from (0,0) in the quad, and fine derivatives
+		// are generated from the destination index and its
+		// neighbours in X and Y.
+		// This isn't spec'd but we must assume something and this
+		// will hopefully get us closest to reproducing actual
+		// results.
+		//
+		// For debugging, we need members of the quad to be able
+		// to generate coarse and fine derivatives.
+		//
+		// For (0,0) we only need the coarse derivatives to get
+		// our neighbours (1,0) and (0,1) which will give us
+		// coarse and fine derivatives being identical.
+		//
+		// For the others we will need to use a combination of
+		// coarse and fine derivatives to get the diagonal element
+		// in the quad. E.g. for (1,1):
+		// 
+		// (1,0) = (1,1) - ddx_fine
+		// (0,1) = (1,1) - ddy_fine
+		// (0,0) = (1,1) - ddy_fine - ddx_coarse
+		//
+		// This only works if coarse and fine are calculated as we
+		// are assuming.
+
 		ddx = (float *)data;
 
 		for(size_t i=0; i < initialValues.size(); i++)
@@ -1642,8 +1774,7 @@ ShaderDebugTrace D3D11DebugManager::DebugPixel(uint32_t frameID, uint32_t eventI
 
 			if(initialValues[i].reg >= 0)
 			{
-				// left
-				if(destIdx == 0 || destIdx == 2)
+				if(destIdx == 0)
 				{
 					for(int w=0; w < initialValues[i].numwords; w++)
 					{
@@ -1651,12 +1782,26 @@ ShaderDebugTrace D3D11DebugManager::DebugPixel(uint32_t frameID, uint32_t eventI
 						traces[3].inputs[initialValues[i].reg].value.fv[initialValues[i].elem+w] += ddx[w];
 					}
 				}
-				else
+				else if(destIdx == 1)
 				{
 					for(int w=0; w < initialValues[i].numwords; w++)
 					{
 						traces[0].inputs[initialValues[i].reg].value.fv[initialValues[i].elem+w] -= ddx[w];
 						traces[2].inputs[initialValues[i].reg].value.fv[initialValues[i].elem+w] -= ddx[w];
+					}
+				}
+				else if(destIdx == 2)
+				{
+					for(int w=0; w < initialValues[i].numwords; w++)
+					{
+						traces[1].inputs[initialValues[i].reg].value.fv[initialValues[i].elem+w] += ddx[w];
+					}
+				}
+				else if(destIdx == 3)
+				{
+					for(int w=0; w < initialValues[i].numwords; w++)
+					{
+						traces[0].inputs[initialValues[i].reg].value.fv[initialValues[i].elem+w] -= ddx[w];
 					}
 				}
 			}
@@ -1672,8 +1817,7 @@ ShaderDebugTrace D3D11DebugManager::DebugPixel(uint32_t frameID, uint32_t eventI
 
 			if(initialValues[i].reg >= 0)
 			{
-				// top
-				if(destIdx == 0 || destIdx == 1)
+				if(destIdx == 0)
 				{
 					for(int w=0; w < initialValues[i].numwords; w++)
 					{
@@ -1681,7 +1825,14 @@ ShaderDebugTrace D3D11DebugManager::DebugPixel(uint32_t frameID, uint32_t eventI
 						traces[3].inputs[initialValues[i].reg].value.fv[initialValues[i].elem+w] += ddy[w];
 					}
 				}
-				else
+				else if(destIdx == 1)
+				{
+					for(int w=0; w < initialValues[i].numwords; w++)
+					{
+						traces[2].inputs[initialValues[i].reg].value.fv[initialValues[i].elem+w] += ddy[w];
+					}
+				}
+				else if(destIdx == 2)
 				{
 					for(int w=0; w < initialValues[i].numwords; w++)
 					{
@@ -1692,6 +1843,61 @@ ShaderDebugTrace D3D11DebugManager::DebugPixel(uint32_t frameID, uint32_t eventI
 			}
 
 			ddy += initialValues[i].numwords;
+		}
+
+		float *ddxfine = ddy;
+
+		for(size_t i=0; i < initialValues.size(); i++)
+		{
+			if(!initialValues[i].included) continue;
+
+			if(initialValues[i].reg >= 0)
+			{
+				if(destIdx == 2)
+				{
+					for(int w=0; w < initialValues[i].numwords; w++)
+					{
+						traces[3].inputs[initialValues[i].reg].value.fv[initialValues[i].elem+w] += ddxfine[w];
+					}
+				}
+				else if(destIdx == 3)
+				{
+					for(int w=0; w < initialValues[i].numwords; w++)
+					{
+						traces[2].inputs[initialValues[i].reg].value.fv[initialValues[i].elem+w] -= ddxfine[w];
+					}
+				}
+			}
+
+			ddxfine += initialValues[i].numwords;
+		}
+
+		float *ddyfine = ddxfine;
+
+		for(size_t i=0; i < initialValues.size(); i++)
+		{
+			if(!initialValues[i].included) continue;
+
+			if(initialValues[i].reg >= 0)
+			{
+				if(destIdx == 1)
+				{
+					for(int w=0; w < initialValues[i].numwords; w++)
+					{
+						traces[3].inputs[initialValues[i].reg].value.fv[initialValues[i].elem+w] += ddyfine[w];
+					}
+				}
+				else if(destIdx == 3)
+				{
+					for(int w=0; w < initialValues[i].numwords; w++)
+					{
+						traces[1].inputs[initialValues[i].reg].value.fv[initialValues[i].elem+w] -= ddyfine[w];
+						traces[0].inputs[initialValues[i].reg].value.fv[initialValues[i].elem+w] -= ddyfine[w];
+					}
+				}
+			}
+
+			ddyfine += initialValues[i].numwords;
 		}
 	}
 	
@@ -1757,12 +1963,12 @@ ShaderDebugTrace D3D11DebugManager::DebugThread(uint32_t frameID, uint32_t event
 
 	for(int i=0; i < D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT; i++)
 		if(rs->CS.ConstantBuffers[i])
-			cbufData[i] = GetBufferData(rs->CS.ConstantBuffers[i], rs->CS.CBOffsets[i]*sizeof(Vec4f), 0);
+			cbufData[i] = GetBufferData(rs->CS.ConstantBuffers[i], rs->CS.CBOffsets[i]*sizeof(Vec4f), 0, true);
 	
 	ShaderDebugTrace ret;
 		
 	GlobalState global;
-	CreateShaderGlobalState(global, dxbc, 0, rs->CS.UAVs, rs->CS.SRVs);
+	CreateShaderGlobalState(global, dxbc, 0, rs->CSUAVs, rs->CS.SRVs);
 	State initialState = CreateShaderDebugState(ret, -1, dxbc, cbufData);
 	
 	for(int i=0; i < 3; i++)
@@ -1788,6 +1994,208 @@ ShaderDebugTrace D3D11DebugManager::DebugThread(uint32_t frameID, uint32_t event
 	ret.states = states;
 
 	return ret;
+}
+
+uint32_t D3D11DebugManager::PickVertex(uint32_t frameID, uint32_t eventID, MeshDisplay cfg, uint32_t x, uint32_t y)
+{
+	if(cfg.position.numVerts == 0)
+		return ~0U;
+
+	D3D11RenderStateTracker tracker(m_WrappedContext);
+
+	struct MeshPickData
+	{
+		Vec2f PickCoords;
+		Vec2f PickViewport;
+
+		Matrix4f PickMVP;
+
+		uint32_t PickIdx;
+		uint32_t PickNumVerts;
+		uint32_t PickPadding[2];
+	} cbuf;
+
+	cbuf.PickCoords = Vec2f((float)x, (float)y);
+	cbuf.PickViewport = Vec2f((float)GetWidth(), (float)GetHeight());
+	cbuf.PickIdx = cfg.position.idxByteWidth ? 1 : 0;
+	cbuf.PickNumVerts = cfg.position.numVerts;
+
+	Matrix4f projMat = Matrix4f::Perspective(90.0f, 0.1f, 100000.0f, float(GetWidth())/float(GetHeight()));
+
+	Matrix4f camMat = cfg.cam ? cfg.cam->GetMatrix() : Matrix4f::Identity();
+	cbuf.PickMVP = projMat.Mul(camMat);
+
+	ResourceFormat resFmt;
+	resFmt.compByteWidth = cfg.position.compByteWidth;
+	resFmt.compCount = cfg.position.compCount;
+	resFmt.compType = cfg.position.compType;
+	resFmt.special = false;
+	if(cfg.position.specialFormat != eSpecial_Unknown)
+	{
+		resFmt.special = true;
+		resFmt.specialFormat = cfg.position.specialFormat;
+	}
+
+	if(cfg.position.unproject)
+	{
+		// the derivation of the projection matrix might not be right (hell, it could be an
+		// orthographic projection). But it'll be close enough likely.
+		Matrix4f guessProj = Matrix4f::Perspective(cfg.fov, cfg.position.nearPlane, cfg.position.farPlane, cfg.aspect);
+
+		if(cfg.ortho)
+			guessProj = Matrix4f::Orthographic(cfg.position.nearPlane, cfg.position.farPlane);
+
+		cbuf.PickMVP = projMat.Mul(camMat.Mul(guessProj.Inverse()));
+	}
+
+	ID3D11Buffer *vb, *ib;
+	DXGI_FORMAT ifmt = cfg.position.idxByteWidth == 4 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT;
+
+	{
+		auto it = WrappedID3D11Buffer::m_BufferList.find(cfg.position.buf);
+
+		if(it != WrappedID3D11Buffer::m_BufferList.end())
+			vb = UNWRAP(WrappedID3D11Buffer, it->second.m_Buffer);
+
+		it = WrappedID3D11Buffer::m_BufferList.find(cfg.position.idxbuf);
+
+		if(it != WrappedID3D11Buffer::m_BufferList.end())
+			ib = UNWRAP(WrappedID3D11Buffer, it->second.m_Buffer);
+	}
+
+	// most IB/VBs will not be available as SRVs. So, we copy into our own buffers.
+	// In the case of VB we also tightly pack and unpack the data. IB can just be
+	// read as R16 or R32 via the SRV so it is just a straight copy
+
+	if(cfg.position.idxByteWidth)
+	{
+		// resize up on demand
+		if(m_DebugRender.PickIBBuf == NULL || m_DebugRender.PickIBSize < cfg.position.numVerts*cfg.position.idxByteWidth)
+		{
+			SAFE_RELEASE(m_DebugRender.PickIBBuf);
+			SAFE_RELEASE(m_DebugRender.PickIBSRV);
+
+			D3D11_BUFFER_DESC desc = { cfg.position.numVerts*cfg.position.idxByteWidth, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0, 0 };
+
+			m_DebugRender.PickIBSize = cfg.position.numVerts*cfg.position.idxByteWidth;
+
+			m_pDevice->CreateBuffer(&desc, NULL, &m_DebugRender.PickIBBuf);
+
+			D3D11_SHADER_RESOURCE_VIEW_DESC sdesc;
+			sdesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+			sdesc.Format = ifmt;
+			sdesc.Buffer.FirstElement = 0;
+			sdesc.Buffer.NumElements = cfg.position.numVerts;
+
+			m_pDevice->CreateShaderResourceView(m_DebugRender.PickIBBuf, &sdesc, &m_DebugRender.PickIBSRV);
+		}
+
+		// copy index data as-is, the view format will take care of the rest
+
+		D3D11_BOX box;
+		box.front = 0;
+		box.back = 1;
+		box.left = cfg.position.idxoffs;
+		box.right = cfg.position.idxoffs + cfg.position.numVerts*cfg.position.idxByteWidth;
+		box.top = 0;
+		box.bottom = 1;
+
+		m_pImmediateContext->CopySubresourceRegion(m_DebugRender.PickIBBuf, 0, 0, 0, 0, ib, 0, &box);
+	}
+
+	if(m_DebugRender.PickVBBuf == NULL || m_DebugRender.PickVBSize < cfg.position.numVerts*sizeof(Vec4f))
+	{
+		SAFE_RELEASE(m_DebugRender.PickVBBuf);
+		SAFE_RELEASE(m_DebugRender.PickVBSRV);
+
+		D3D11_BUFFER_DESC desc = { cfg.position.numVerts*sizeof(Vec4f), D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0, 0 };
+
+		m_DebugRender.PickVBSize = cfg.position.numVerts*sizeof(Vec4f);
+
+		m_pDevice->CreateBuffer(&desc, NULL, &m_DebugRender.PickVBBuf);
+
+		D3D11_SHADER_RESOURCE_VIEW_DESC sdesc;
+		sdesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+		sdesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+		sdesc.Buffer.FirstElement = 0;
+		sdesc.Buffer.NumElements = cfg.position.numVerts;
+
+		m_pDevice->CreateShaderResourceView(m_DebugRender.PickVBBuf, &sdesc, &m_DebugRender.PickVBSRV);
+	}
+
+	// unpack and linearise the data
+	{
+		FloatVector *vbData = new FloatVector[cfg.position.numVerts];
+
+		vector<byte> oldData = GetBufferData(vb, cfg.position.offset, 0, false);
+
+		byte *data = &oldData[0];
+		byte *dataEnd = data + oldData.size();
+
+		bool valid;
+
+		for(uint32_t i=0; i < cfg.position.numVerts; i++)
+			vbData[i] = InterpretVertex(data, i, cfg, dataEnd, false, valid);
+
+		m_pImmediateContext->UpdateSubresource(m_DebugRender.PickVBBuf, 0, NULL, vbData, sizeof(Vec4f), sizeof(Vec4f));
+
+		delete[] vbData;
+	}
+
+	ID3D11ShaderResourceView *srvs[2] = { m_DebugRender.PickIBSRV, m_DebugRender.PickVBSRV };
+
+	ID3D11Buffer *buf = MakeCBuffer((float *)&cbuf, sizeof(cbuf));
+
+	m_pImmediateContext->CSSetConstantBuffers(0, 1, &buf);
+
+	m_pImmediateContext->CSSetShaderResources(0, 2, srvs);
+
+	UINT reset = 0;
+	m_pImmediateContext->CSSetUnorderedAccessViews(0, 1, &m_DebugRender.PickResultUAV, &reset);
+
+	m_pImmediateContext->CSSetShader(m_DebugRender.MeshPickCS, NULL, 0);
+
+	m_pImmediateContext->Dispatch(cfg.position.numVerts/1024 + 1, 1, 1);
+
+	m_pImmediateContext->CopyStructureCount(m_DebugRender.histogramBuff, 0, m_DebugRender.PickResultUAV);
+
+	vector<byte> results = GetBufferData(m_DebugRender.histogramBuff, 0, 0, false);
+
+	uint32_t numResults = *(uint32_t *)&results[0];
+
+	if(numResults > 0)
+	{
+		results = GetBufferData(m_DebugRender.PickResultBuf, 0, 0, false);
+
+		struct PickResult
+		{
+			uint32_t vertid; uint32_t idx; float len; float depth;
+		};
+
+		PickResult *pickResults = (PickResult *)&results[0];
+
+		PickResult *closest = pickResults;
+
+		// min with size of results buffer to protect against overflows
+		for(uint32_t i=1; i < RDCMIN(DebugRenderData::maxMeshPicks, numResults); i++)
+		{
+			// We need to keep the picking order consistent in the face
+			// of random buffer appends, when multiple vertices have the
+			// identical position (e.g. if UVs or normals are different).
+			//
+			// We could do something to try and disambiguate, but it's
+			// never going to be intuitive, it's just going to flicker
+			// confusingly.
+			if(pickResults[i].len < closest->len ||
+			   (pickResults[i].len == closest->len && pickResults[i].depth < closest->depth) ||
+			   (pickResults[i].len == closest->len && pickResults[i].depth == closest->depth && pickResults[i].vertid < closest->vertid))
+				closest = pickResults+i;
+		}
+
+		return closest->vertid;
+	}
+
+	return ~0U;
 }
 
 void D3D11DebugManager::PickPixel(ResourceId texture, uint32_t x, uint32_t y, uint32_t sliceFace, uint32_t mip, uint32_t sample, float pixel[4])
@@ -3305,6 +3713,8 @@ struct CopyPixelParams
 	bool uintTex;
 	bool intTex;
 	
+	UINT subres;
+
 	bool depthcopy; // are we copying depth or colour
 	bool depthbound; // if copying depth, was any depth bound (or should we write <-1,-1> marker)
 
@@ -3324,7 +3734,7 @@ void D3D11DebugManager::PixelHistoryCopyPixel(CopyPixelParams &p, uint32_t x, ui
 {
 	// perform a subresource copy if the real source tex couldn't be directly bound as SRV
 	if(p.sourceTex != p.srvTex && p.sourceTex && p.srvTex)
-		m_pImmediateContext->CopySubresourceRegion(p.srvTex, 0, 0, 0, 0, p.sourceTex, 0, NULL);
+		m_pImmediateContext->CopySubresourceRegion(p.srvTex, p.subres, 0, 0, 0, p.sourceTex, p.subres, NULL);
 
 	ID3D11RenderTargetView* tmpViews[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {0};
 	m_pImmediateContext->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, tmpViews, NULL);
@@ -3340,10 +3750,11 @@ void D3D11DebugManager::PixelHistoryCopyPixel(CopyPixelParams &p, uint32_t x, ui
 	}
 
 	ID3D11RenderTargetView* prevRTVs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {0};
-	ID3D11UnorderedAccessView* prevUAVs[D3D11_PS_CS_UAV_REGISTER_COUNT] = {0};
+	ID3D11UnorderedAccessView* prevUAVs[D3D11_1_UAV_SLOT_COUNT] = {0};
 	ID3D11DepthStencilView *prevDSV = NULL;
+	const UINT numUAVs = m_WrappedContext->IsFL11_1() ? D3D11_1_UAV_SLOT_COUNT : D3D11_PS_CS_UAV_REGISTER_COUNT;
 	m_pImmediateContext->OMGetRenderTargetsAndUnorderedAccessViews(UAVStartSlot, prevRTVs, &prevDSV,
-																																 UAVStartSlot, D3D11_PS_CS_UAV_REGISTER_COUNT-UAVStartSlot, prevUAVs);
+																																 UAVStartSlot, numUAVs-UAVStartSlot, prevUAVs);
 
 	m_pImmediateContext->OMSetRenderTargetsAndUnorderedAccessViews(0, NULL, NULL, 0, 0, NULL, NULL);
 
@@ -3353,7 +3764,8 @@ void D3D11DebugManager::PixelHistoryCopyPixel(CopyPixelParams &p, uint32_t x, ui
 	ID3D11Buffer *curCSCBuf[2] = {0};
 	ID3D11ShaderResourceView *curCSSRVs[10] = {0};
 	ID3D11UnorderedAccessView *curCSUAV[4] = {0};
-	UINT initCounts[D3D11_PS_CS_UAV_REGISTER_COUNT] = { ~0U, ~0U, ~0U, ~0U, ~0U, ~0U, ~0U, ~0U, };
+	UINT initCounts[D3D11_1_UAV_SLOT_COUNT];
+	memset(&initCounts[0], 0xff, sizeof(initCounts));
 
 	m_pImmediateContext->CSGetShader(&curCS, curCSInst, &curCSNumInst);
 	m_pImmediateContext->CSGetConstantBuffers(0, ARRAY_COUNT(curCSCBuf), curCSCBuf);
@@ -3411,13 +3823,12 @@ void D3D11DebugManager::PixelHistoryCopyPixel(CopyPixelParams &p, uint32_t x, ui
 	m_pImmediateContext->CSSetUnorderedAccessViews(0, ARRAY_COUNT(curCSUAV), curCSUAV, initCounts);
 	
 	m_pImmediateContext->OMSetRenderTargetsAndUnorderedAccessViews(UAVStartSlot, prevRTVs, prevDSV, UAVStartSlot,
-																																 D3D11_PS_CS_UAV_REGISTER_COUNT-UAVStartSlot, prevUAVs, initCounts);
+																																 numUAVs-UAVStartSlot, prevUAVs, initCounts);
 	
 	for(int i=0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; i++)
-	{
 		SAFE_RELEASE(prevRTVs[i]);
+	for(int i=0; i < D3D11_1_UAV_SLOT_COUNT; i++)
 		SAFE_RELEASE(prevUAVs[i]);
-	}
 	SAFE_RELEASE(prevDSV);
 		
 	SAFE_RELEASE(curCS);
@@ -3427,7 +3838,7 @@ void D3D11DebugManager::PixelHistoryCopyPixel(CopyPixelParams &p, uint32_t x, ui
 	for(size_t i=0; i < ARRAY_COUNT(curCSUAV); i++)  SAFE_RELEASE(curCSUAV[i]);
 }
 
-vector<PixelModification> D3D11DebugManager::PixelHistory(uint32_t frameID, vector<EventUsage> events, ResourceId target, uint32_t x, uint32_t y, uint32_t sampleIdx)
+vector<PixelModification> D3D11DebugManager::PixelHistory(uint32_t frameID, vector<EventUsage> events, ResourceId target, uint32_t x, uint32_t y, uint32_t slice, uint32_t mip, uint32_t sampleIdx)
 {
 	vector<PixelModification> history;
 
@@ -3473,10 +3884,10 @@ vector<PixelModification> D3D11DebugManager::PixelHistory(uint32_t frameID, vect
 
 	ID3D11Query *testQueries[6] = {0}; // one query for each test we do per-drawcall
 
-	uint32_t pixstoreStride = 3;
+	uint32_t pixstoreStride = 4;
 	
 	// reserve 3 pixels per draw (worst case all events). This is used for Pre value, Post value and
-	// # frag overdraw. It's reused later to retrieve per-fragment post values.
+	// # frag overdraw (with & without original shader). It's reused later to retrieve per-fragment post values.
 	uint32_t pixstoreSlots = (uint32_t)(events.size() * pixstoreStride);
 
 	// need UAV compatible format, so switch B8G8R8A8 for R8G8B8A8, everything will
@@ -3490,6 +3901,18 @@ vector<PixelModification> D3D11DebugManager::PixelHistory(uint32_t frameID, vect
 	if(details.texFmt == DXGI_FORMAT_R32G32B32_FLOAT) details.texFmt = DXGI_FORMAT_R32G32B32A32_FLOAT;
 	if(details.texFmt == DXGI_FORMAT_R32G32B32_UINT) details.texFmt = DXGI_FORMAT_R32G32B32A32_UINT;
 	if(details.texFmt == DXGI_FORMAT_R32G32B32_SINT) details.texFmt = DXGI_FORMAT_R32G32B32A32_SINT;
+
+	// these formats are only valid for depth textures at which point pixstore doesn't matter, so it
+	// can be anything.
+	if(details.texFmt == DXGI_FORMAT_R24_UNORM_X8_TYPELESS ||
+		 details.texFmt == DXGI_FORMAT_X24_TYPELESS_G8_UINT ||
+		 details.texFmt == DXGI_FORMAT_R24G8_TYPELESS ||
+		 details.texFmt == DXGI_FORMAT_D24_UNORM_S8_UINT ||
+
+		 details.texFmt == DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS ||
+		 details.texFmt == DXGI_FORMAT_X32_TYPELESS_G8X24_UINT ||
+		 details.texFmt == DXGI_FORMAT_R32G8X24_TYPELESS ||
+		 details.texFmt == DXGI_FORMAT_D32_FLOAT_S8X24_UINT) details.texFmt = DXGI_FORMAT_R32G32B32A32_UINT;
 
 	// define a texture that we can copy before/after results into
 	D3D11_TEXTURE2D_DESC pixstoreDesc = {
@@ -3623,8 +4046,8 @@ vector<PixelModification> D3D11DebugManager::PixelHistory(uint32_t frameID, vect
 	D3D11_TEXTURE2D_DESC depthCopyD24S8Desc = {
 		details.texWidth,
 		details.texHeight,
-		1U,
-		1U,
+		details.texMips,
+		details.texArraySize,
 		DXGI_FORMAT_R24G8_TYPELESS,
 		{ details.sampleCount, details.sampleQuality },
 		D3D11_USAGE_DEFAULT,
@@ -3666,19 +4089,24 @@ vector<PixelModification> D3D11DebugManager::PixelHistory(uint32_t frameID, vect
 	}
 
 	uint32_t srcxyData[8] = {
-		x, y, sampleIdx,
+		x, y, multisampled ? sampleIdx : mip, slice,
+
 		uint32_t(multisampled),
-	
 		uint32_t(floatTex),
 		uint32_t(uintTex),
 		uint32_t(intTex),
-		0,
 	};
 
+	uint32_t shadoutsrcxyData[8];
+	memcpy(shadoutsrcxyData, srcxyData, sizeof(srcxyData));
+	srcxyData[2] = multisampled ? sampleIdx : 0;
+
 	ID3D11Buffer *srcxyCBuf = MakeCBuffer(sizeof(srcxyData));
+	ID3D11Buffer *shadoutsrcxyCBuf = MakeCBuffer(sizeof(shadoutsrcxyData));
 	ID3D11Buffer *storexyCBuf = MakeCBuffer(sizeof(srcxyData));
 
 	FillCBuffer(srcxyCBuf, (float *)srcxyData, sizeof(srcxyData));
+	FillCBuffer(shadoutsrcxyCBuf, (float *)srcxyData, sizeof(shadoutsrcxyData));
 
 	// so we do:
 	// per sample: orig depth --copy--> depthCopyXXX (created/upsized on demand) --CS pixel copy--> pixstoreDepth
@@ -3716,6 +4144,7 @@ vector<PixelModification> D3D11DebugManager::PixelHistory(uint32_t frameID, vect
 	colourCopyParams.intTex = intTex;
 	colourCopyParams.srcxyCBuf = srcxyCBuf;
 	colourCopyParams.storexyCBuf = storexyCBuf;
+	colourCopyParams.subres = details.texArraySize * slice + mip;
 	
 	CopyPixelParams depthCopyParams = colourCopyParams;
 
@@ -3869,6 +4298,7 @@ vector<PixelModification> D3D11DebugManager::PixelHistory(uint32_t frameID, vect
 		SAFE_RELEASE(depthCopyD16_DepthSRV);
 
 		SAFE_RELEASE(srcxyCBuf);
+		SAFE_RELEASE(shadoutsrcxyCBuf);
 		SAFE_RELEASE(storexyCBuf);
 
 		return history;
@@ -4285,8 +4715,6 @@ vector<PixelModification> D3D11DebugManager::PixelHistory(uint32_t frameID, vect
 			m_WrappedDevice->ReplayLog(frameID, 0, events[ev].eventID, eReplay_OnlyDraw);
 
 		m_pImmediateContext->End(occl[ev]);
-		
-		m_pImmediateContext->PSSetShader(curPS, curInst, curNumInst);
 
 		// determine how many fragments returned from the shader
 		if(!uavOutput)
@@ -4319,10 +4747,11 @@ vector<PixelModification> D3D11DebugManager::PixelHistory(uint32_t frameID, vect
 			}
 
 			ID3D11RenderTargetView* prevRTVs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {0};
-			ID3D11UnorderedAccessView* prevUAVs[D3D11_PS_CS_UAV_REGISTER_COUNT] = {0};
+			ID3D11UnorderedAccessView* prevUAVs[D3D11_1_UAV_SLOT_COUNT] = {0};
 			ID3D11DepthStencilView *prevDSV = NULL;
+			const UINT numUAVs = m_WrappedContext->IsFL11_1() ? D3D11_1_UAV_SLOT_COUNT : D3D11_PS_CS_UAV_REGISTER_COUNT;
 			m_pImmediateContext->OMGetRenderTargetsAndUnorderedAccessViews(UAVStartSlot, prevRTVs, &prevDSV,
-			                                                               UAVStartSlot, D3D11_PS_CS_UAV_REGISTER_COUNT-UAVStartSlot, prevUAVs);
+			                                                               UAVStartSlot, numUAVs-UAVStartSlot, prevUAVs);
 
 			CopyPixelParams params = depthCopyParams;
 			params.depthbound = true;
@@ -4334,21 +4763,33 @@ vector<PixelModification> D3D11DebugManager::PixelHistory(uint32_t frameID, vect
 
 			m_pImmediateContext->OMSetRenderTargets(0, NULL, shaddepthOutputDSV);
 
+			// replay first with overlay shader. This is guaranteed to count all fragments
 			m_WrappedDevice->ReplayLog(frameID, 0, events[ev].eventID, eReplay_OnlyDraw);
+			PixelHistoryCopyPixel(params, storex*pixstoreStride + 2, storey);
 
-			UINT initCounts[D3D11_PS_CS_UAV_REGISTER_COUNT] = { ~0U, ~0U, ~0U, ~0U, ~0U, ~0U, ~0U, ~0U, };
+			m_pImmediateContext->PSSetShader(curPS, curInst, curNumInst);
+
+			m_pImmediateContext->ClearDepthStencilView(shaddepthOutputDSV, D3D11_CLEAR_STENCIL, 1.0f, 0);
+
+			// now replay with original shader. Some fragments may discard and not be counted
+			m_WrappedDevice->ReplayLog(frameID, 0, events[ev].eventID, eReplay_OnlyDraw);
+			PixelHistoryCopyPixel(params, storex*pixstoreStride + 3, storey);
+
+			UINT initCounts[D3D11_1_UAV_SLOT_COUNT];
+			memset(&initCounts[0], 0xff, sizeof(initCounts));
 			
 			m_pImmediateContext->OMSetRenderTargetsAndUnorderedAccessViews(UAVStartSlot, prevRTVs, prevDSV, UAVStartSlot,
-			                                                               D3D11_PS_CS_UAV_REGISTER_COUNT-UAVStartSlot, prevUAVs, initCounts);
+			                                                               numUAVs-UAVStartSlot, prevUAVs, initCounts);
 			
 			for(int i=0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; i++)
-			{
 				SAFE_RELEASE(prevRTVs[i]);
+			for(int i=0; i < D3D11_1_UAV_SLOT_COUNT; i++)
 				SAFE_RELEASE(prevUAVs[i]);
-			}
 			SAFE_RELEASE(prevDSV);
-			
-			PixelHistoryCopyPixel(params, storex*pixstoreStride + 2, storey);
+		}
+		else
+		{
+			m_pImmediateContext->PSSetShader(curPS, curInst, curNumInst);
 		}
 
 		m_pImmediateContext->RSSetState(curRS);
@@ -4427,6 +4868,165 @@ vector<PixelModification> D3D11DebugManager::PixelHistory(uint32_t frameID, vect
 					mod.scissorClipped = true;
 
 				m_WrappedDevice->ReplayLog(frameID, 0, events[i].eventID, eReplay_WithoutDraw);
+
+				{
+					ID3D11RenderTargetView* tmpViews[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {0};
+					m_pImmediateContext->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, tmpViews, NULL);
+
+					uint32_t UAVStartSlot = 0;
+					for(int v=0; v < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; v++)
+					{
+						if(tmpViews[v] != NULL)
+						{
+							UAVStartSlot  = v+1;
+							SAFE_RELEASE(tmpViews[v]);
+						}
+					}
+
+					ID3D11RenderTargetView* curRTVs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {0};
+					ID3D11UnorderedAccessView* curUAVs[D3D11_1_UAV_SLOT_COUNT] = {0};
+					ID3D11DepthStencilView *curDSV = NULL;
+					const UINT numUAVs = m_WrappedContext->IsFL11_1() ? D3D11_1_UAV_SLOT_COUNT : D3D11_PS_CS_UAV_REGISTER_COUNT;
+					m_pImmediateContext->OMGetRenderTargetsAndUnorderedAccessViews(UAVStartSlot, curRTVs, &curDSV,
+					                                                               UAVStartSlot, numUAVs-UAVStartSlot, curUAVs);
+
+					// check that this selected mip/slice is the one being rendered to here
+					if(events[i].usage == eUsage_ColourTarget)
+					{
+						bool used = false;
+						for(int i=0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; i++)
+						{
+							if(curRTVs[i])
+							{
+								ID3D11Resource *res = NULL;
+								curRTVs[i]->GetResource(&res);
+
+								if(res != targetres)
+									continue;
+
+								SAFE_RELEASE(res);
+
+								D3D11_RENDER_TARGET_VIEW_DESC desc;
+								curRTVs[i]->GetDesc(&desc);
+								if(desc.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE1D &&
+								   desc.Texture1D.MipSlice == mip)
+								{
+									used = true;
+									break;
+								}
+								else if(desc.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE1DARRAY &&
+								        desc.Texture1DArray.MipSlice == mip &&
+												desc.Texture1DArray.FirstArraySlice <= slice &&
+												desc.Texture1DArray.FirstArraySlice+desc.Texture1DArray.ArraySize > slice)
+								{
+									used = true;
+									break;
+								}
+								else if(desc.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2D &&
+								        desc.Texture2D.MipSlice == mip)
+								{
+									used = true;
+									break;
+								}
+								else if(desc.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2DARRAY &&
+								        desc.Texture2DArray.MipSlice == mip &&
+												desc.Texture2DArray.FirstArraySlice <= slice &&
+												desc.Texture2DArray.FirstArraySlice+desc.Texture2DArray.ArraySize > slice)
+								{
+									used = true;
+									break;
+								}
+								else if(desc.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2DMS)
+								{
+									used = true;
+									break;
+								}
+								else if(desc.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2DMSARRAY &&
+												desc.Texture2DMSArray.FirstArraySlice <= slice &&
+												desc.Texture2DMSArray.FirstArraySlice+desc.Texture2DMSArray.ArraySize > slice)
+								{
+									used = true;
+									break;
+								}
+								else if(desc.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE3D &&
+								        desc.Texture3D.MipSlice == mip &&
+												desc.Texture3D.FirstWSlice <= slice &&
+												desc.Texture3D.FirstWSlice+desc.Texture3D.WSize > slice)
+								{
+									used = true;
+									break;
+								}
+							}
+						}
+						if(!used) continue;
+					}
+					else if(events[i].usage == eUsage_DepthStencilTarget)
+					{
+						if(!curDSV) continue;
+
+						ID3D11Resource *res = NULL;
+						curDSV->GetResource(&res);
+
+						if(res != targetres)
+							continue;
+
+						SAFE_RELEASE(res);
+
+						D3D11_DEPTH_STENCIL_VIEW_DESC desc;
+						curDSV->GetDesc(&desc);
+
+						bool used = false;
+
+						if(desc.ViewDimension == D3D11_DSV_DIMENSION_TEXTURE1D &&
+							desc.Texture1D.MipSlice == mip)
+						{
+							used = true;
+							break;
+						}
+						else if(desc.ViewDimension == D3D11_DSV_DIMENSION_TEXTURE1DARRAY &&
+							desc.Texture1DArray.MipSlice == mip &&
+							desc.Texture1DArray.FirstArraySlice <= slice &&
+							desc.Texture1DArray.FirstArraySlice+desc.Texture1DArray.ArraySize > slice)
+						{
+							used = true;
+							break;
+						}
+						else if(desc.ViewDimension == D3D11_DSV_DIMENSION_TEXTURE2D &&
+							desc.Texture2D.MipSlice == mip)
+						{
+							used = true;
+							break;
+						}
+						else if(desc.ViewDimension == D3D11_DSV_DIMENSION_TEXTURE2DARRAY &&
+							desc.Texture2DArray.MipSlice == mip &&
+							desc.Texture2DArray.FirstArraySlice <= slice &&
+							desc.Texture2DArray.FirstArraySlice+desc.Texture2DArray.ArraySize > slice)
+						{
+							used = true;
+							break;
+						}
+						else if(desc.ViewDimension == D3D11_DSV_DIMENSION_TEXTURE2DMS)
+						{
+							used = true;
+							break;
+						}
+						else if(desc.ViewDimension == D3D11_DSV_DIMENSION_TEXTURE2DMSARRAY &&
+							desc.Texture2DMSArray.FirstArraySlice <= slice &&
+							desc.Texture2DMSArray.FirstArraySlice+desc.Texture2DMSArray.ArraySize > slice)
+						{
+							used = true;
+							break;
+						}
+
+						if(!used) continue;
+					}
+
+					for(int i=0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; i++)
+						SAFE_RELEASE(curRTVs[i]);
+					for(int i=0; i < D3D11_1_UAV_SLOT_COUNT; i++)
+						SAFE_RELEASE(curUAVs[i]);
+					SAFE_RELEASE(curDSV);
+				}
 
 				curNumScissors = curNumViews = 16;
 				m_pImmediateContext->RSGetViewports(&curNumViews, curViewports);
@@ -4917,7 +5517,10 @@ vector<PixelModification> D3D11DebugManager::PixelHistory(uint32_t frameID, vect
 			mod.postMod.stencil = int32_t(data[3]);
 			
 			// data[4] unused
-			mod.shaderOut.col.value_i[0] = int32_t(data[5]); // fragments writing to the pixel in this event
+			mod.shaderOut.col.value_i[0] = int32_t(data[5]); // fragments writing to the pixel in this event with overlay shader
+
+			// data[6] unused
+			mod.shaderOut.col.value_i[1] = int32_t(data[7]); // fragments writing to the pixel in this event with original shader
 		}
 	}
 	
@@ -4931,6 +5534,11 @@ vector<PixelModification> D3D11DebugManager::PixelHistory(uint32_t frameID, vect
 	for(size_t h=0; h < history.size(); )
 	{
 		int32_t frags = RDCMAX(1, history[h].shaderOut.col.value_i[0]);
+		int32_t fragsClipped = RDCCLAMP(history[h].shaderOut.col.value_i[1], 1, frags);
+
+		// if we have fewer fragments with the original shader, some discarded
+		// so we need to do a thorough check to see which fragments discarded
+		bool someFragsClipped = (fragsClipped < frags);
 
 		PixelModification mod = history[h];
 
@@ -4938,7 +5546,10 @@ vector<PixelModification> D3D11DebugManager::PixelHistory(uint32_t frameID, vect
 			history.insert(history.begin()+h+1, mod);
 
 		for(int32_t f=0; f < frags; f++)
+		{
 			history[h+f].fragIndex = f;
+			history[h+f].primitiveID = someFragsClipped;
+		}
 
 		h += frags;
 	}
@@ -4962,6 +5573,7 @@ vector<PixelModification> D3D11DebugManager::PixelHistory(uint32_t frameID, vect
 	shadoutCopyParams.sourceTex = shadoutCopyParams.srvTex = shadOutput;
 	shadoutCopyParams.srv[0] = shadOutputSRV;
 	shadoutCopyParams.uav = shadoutStoreUAV;
+	shadoutCopyParams.srcxyCBuf = shadoutsrcxyCBuf;
 	
 	depthCopyParams.sourceTex = depthCopyParams.srvTex = shaddepthOutput;
 	depthCopyParams.srv[0] = shaddepthOutputDepthSRV;
@@ -5193,6 +5805,14 @@ vector<PixelModification> D3D11DebugManager::PixelHistory(uint32_t frameID, vect
 	shadColSlot = 0;
 	depthSlot = 0;
 
+	prev = 0;
+
+	// this is used to track if any previous fragments in the current draw
+	// discarded. If so, the shader output values will be off-by-one in the
+	// shader output storage due to stencil counting errors, and we need to
+	// offset.
+	uint32_t discardedOffset = 0;
+
 	for(size_t h=0; h < history.size(); h++)
 	{
 		const FetchDrawcall *draw = m_WrappedDevice->GetDrawcall(frameID, history[h].eventID);
@@ -5291,22 +5911,37 @@ vector<PixelModification> D3D11DebugManager::PixelHistory(uint32_t frameID, vect
 		{
 			history[h].preMod = history[h-1].postMod;
 		}
+
+		// reset discarded offset every event
+		if(h > 0 && history[h].eventID != history[h-1].eventID)
+		{
+			discardedOffset = 0;
+		}
 		
 		// fetch shader output value
 		{
 			// colour
 			{
 				// shader output is always 4 32bit components, so we can copy straight
-				byte *rowdata = shadoutStoreData + mappedShadout.RowPitch * (shadColSlot/2048);
-				byte *data = rowdata + 4 * sizeof(float) * (shadColSlot%2048);
+				// Note that because shader output values are interleaved with
+				// primitive IDs, the discardedOffset is doubled when looking at
+				// shader output values
+				uint32_t offsettedSlot = (shadColSlot - discardedOffset*2);
+				RDCASSERT(discardedOffset*2 <= shadColSlot);
+
+				byte *rowdata = shadoutStoreData + mappedShadout.RowPitch * (offsettedSlot/2048);
+				byte *data = rowdata + 4 * sizeof(float) * (offsettedSlot%2048);
 
 				memcpy(&history[h].shaderOut.col.value_u[0], data, 4*sizeof(float));
 			}
 
 			// depth
 			{
-				byte *rowdata = pixstoreDepthData + mappedDepth.RowPitch * (depthSlot/2048);
-				float *data = (float *)(rowdata + 2 * sizeof(float) * (depthSlot%2048));
+				uint32_t offsettedSlot = (depthSlot - discardedOffset);
+				RDCASSERT(discardedOffset <= depthSlot);
+
+				byte *rowdata = pixstoreDepthData + mappedDepth.RowPitch * (offsettedSlot/2048);
+				float *data = (float *)(rowdata + 2 * sizeof(float) * (offsettedSlot%2048));
 
 				history[h].shaderOut.depth = data[0];
 				if(history[h].postMod.stencil == -1)
@@ -5324,10 +5959,110 @@ vector<PixelModification> D3D11DebugManager::PixelHistory(uint32_t frameID, vect
 			// shader output is always 4 32bit components, so we can copy straight
 			byte *rowdata = shadoutStoreData + mappedShadout.RowPitch * (shadColSlot/2048);
 			byte *data = rowdata + 4 * sizeof(float) * (shadColSlot%2048);
+
+			bool someFragsClipped = history[h].primitiveID != 0;
 			
 			memcpy(&history[h].primitiveID, data, sizeof(uint32_t));
 
 			shadColSlot++;
+
+			// if some fragments clipped in this draw, we need to check to see if this
+			// primitive ID was one of the ones that clipped.
+			// Currently the way we do that is by drawing only that primitive
+			// and doing a 
+			if(someFragsClipped)
+			{
+				// don't need to worry about trashing state, since at this point we don't need to restore it anymore
+				if(prev != history[h].eventID)
+				{
+					m_WrappedDevice->ReplayLog(frameID, 0, history[h].eventID, eReplay_WithoutDraw);
+
+					//////////////////////////////////////////////////////////////
+					// Set up an identical raster state, but with scissor enabled.
+					// This matches the setup when we were originally fetching the
+					// number of fragments.
+					m_pImmediateContext->RSGetState(&curRS);
+
+					D3D11_RASTERIZER_DESC rsDesc = {
+						/*FillMode =*/ D3D11_FILL_SOLID,
+						/*CullMode =*/ D3D11_CULL_BACK,
+						/*FrontCounterClockwise =*/ FALSE,
+						/*DepthBias =*/ D3D11_DEFAULT_DEPTH_BIAS,
+						/*DepthBiasClamp =*/ D3D11_DEFAULT_DEPTH_BIAS_CLAMP,
+						/*SlopeScaledDepthBias =*/ D3D11_DEFAULT_SLOPE_SCALED_DEPTH_BIAS,
+						/*DepthClipEnable =*/ TRUE,
+						/*ScissorEnable =*/ FALSE,
+						/*MultisampleEnable =*/ FALSE,
+						/*AntialiasedLineEnable =*/ FALSE,
+					};
+
+					if(curRS)
+						curRS->GetDesc(&rsDesc);
+
+					SAFE_RELEASE(curRS);
+
+					rsDesc.ScissorEnable = TRUE;
+
+					// scissor to our pixel
+					newScissors[0].left = LONG(x);
+					newScissors[0].top = LONG(y);
+					newScissors[0].right = newScissors[0].left+1;
+					newScissors[0].bottom = newScissors[0].top+1;
+
+					m_pImmediateContext->RSSetScissorRects(1, newScissors);
+
+					m_pDevice->CreateRasterizerState(&rsDesc, &newRS);
+
+					m_pImmediateContext->RSSetState(newRS);
+
+					// other states can just be set to always pass, we already know this primitive ID renders
+					m_pImmediateContext->OMSetBlendState(m_DebugRender.NopBlendState, blendFactor, sampleMask);
+					m_pImmediateContext->OMSetRenderTargets(0, NULL, shaddepthOutputDSV);
+					m_pImmediateContext->OMSetDepthStencilState(m_DebugRender.AllPassDepthState, 0);
+
+					SAFE_RELEASE(newRS);
+				}
+				prev = history[h].eventID;
+
+				m_pImmediateContext->ClearDepthStencilView(shaddepthOutputDSV, D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL, 0.0f, 0);
+
+				m_pImmediateContext->Begin(testQueries[0]);
+
+				// do draw
+				const FetchDrawcall *draw = m_WrappedDevice->GetDrawcall(frameID, history[h].eventID);
+				if(draw->flags & eDraw_UseIBuffer)
+				{
+					// TODO once pixel history distinguishes between instances, draw only the instance for this fragment
+					m_pImmediateContext->DrawIndexedInstanced(Topology_NumVerticesPerPrimitive(draw->topology),
+						RDCMAX(1U, draw->numInstances),
+						draw->indexOffset + Topology_VertexOffset(draw->topology, history[h].primitiveID),
+						draw->vertexOffset, draw->instanceOffset);
+				}
+				else
+				{
+					m_pImmediateContext->DrawInstanced(Topology_NumVerticesPerPrimitive(draw->topology),
+						RDCMAX(1U, draw->numInstances),
+						draw->vertexOffset + Topology_VertexOffset(draw->topology, history[h].primitiveID),
+						draw->instanceOffset);
+				}
+
+				m_pImmediateContext->End(testQueries[0]);
+
+				do
+				{
+					hr = m_pImmediateContext->GetData(testQueries[0], &occlData, sizeof(occlData), 0);
+				} while(hr == S_FALSE);
+				RDCASSERT(hr == S_OK);
+
+				if(occlData == 0)
+				{
+					history[h].shaderDiscarded = true;
+					discardedOffset++;
+					RDCEraseEl(history[h].shaderOut);
+					history[h].shaderOut.depth = -1.0f;
+					history[h].shaderOut.stencil = -1;
+				}
+			}
 		}
 	}
 
@@ -5485,6 +6220,7 @@ vector<PixelModification> D3D11DebugManager::PixelHistory(uint32_t frameID, vect
 	SAFE_RELEASE(depthCopyD16_DepthSRV);
 
 	SAFE_RELEASE(srcxyCBuf);
+	SAFE_RELEASE(shadoutsrcxyCBuf);
 	SAFE_RELEASE(storexyCBuf);
 
 	return history;

@@ -59,6 +59,9 @@ void WrappedOpenGL::glFinish()
 
 GLboolean WrappedOpenGL::glIsEnabled(GLenum cap)
 {
+	if(cap == eGL_DEBUG_TOOL_EXT)
+		return true;
+
 	return m_Real.glIsEnabled(cap);
 }
 
@@ -69,6 +72,9 @@ GLboolean WrappedOpenGL::glIsTexture(GLuint texture)
 
 GLboolean WrappedOpenGL::glIsEnabledi(GLenum target, GLuint index)
 {
+	if(target == eGL_DEBUG_TOOL_EXT)
+		return true;
+
 	return m_Real.glIsEnabledi(target, index);
 }
 
@@ -160,10 +166,16 @@ void WrappedOpenGL::glGetIntegerv(GLenum pname, GLint *params)
 			*params = (GLint)64;
 		return;
 	}
-	if(pname == eGL_NUM_EXTENSIONS)
+	else if(pname == eGL_NUM_EXTENSIONS)
 	{
 		if(params)
 			*params = (GLint)GetCtxData().glExts.size();
+		return;
+	}
+	else if(pname == eGL_DEBUG_TOOL_PURPOSE_EXT)
+	{
+		if(params)
+			*params = GLint(eGL_DEBUG_TOOL_FRAME_CAPTURE_BIT_EXT);
 		return;
 	}
 
@@ -180,7 +192,13 @@ void WrappedOpenGL::glGetInteger64v(GLenum pname, GLint64 *data)
 	if(pname == eGL_MIN_MAP_BUFFER_ALIGNMENT)
 	{
 		if(data)
-			*data = (GLint)64;
+			*data = (GLint64)64;
+		return;
+	}
+	else if(pname == eGL_DEBUG_TOOL_PURPOSE_EXT)
+	{
+		if(data)
+			*data = GLint64(eGL_DEBUG_TOOL_FRAME_CAPTURE_BIT_EXT);
 		return;
 	}
 	m_Real.glGetInteger64v(pname, data);
@@ -197,6 +215,12 @@ void WrappedOpenGL::glGetIntegeri_v(GLenum pname, GLuint index, GLint *data)
 	{
 		if(data)
 			*data = (GLint)64;
+		return;
+	}
+	else if(pname == eGL_DEBUG_TOOL_PURPOSE_EXT)
+	{
+		if(data)
+			*data = GLint(eGL_DEBUG_TOOL_FRAME_CAPTURE_BIT_EXT);
 		return;
 	}
 	m_Real.glGetIntegeri_v(pname, index, data);
@@ -217,7 +241,13 @@ void WrappedOpenGL::glGetInteger64i_v(GLenum pname, GLuint index, GLint64 *data)
 	if(pname == eGL_MIN_MAP_BUFFER_ALIGNMENT)
 	{
 		if(data)
-			*data = (GLint)64;
+			*data = (GLint64)64;
+		return;
+	}
+	else if(pname == eGL_DEBUG_TOOL_PURPOSE_EXT)
+	{
+		if(data)
+			*data = GLint64(eGL_DEBUG_TOOL_FRAME_CAPTURE_BIT_EXT);
 		return;
 	}
 	m_Real.glGetInteger64i_v(pname, index, data);
@@ -477,6 +507,10 @@ const GLubyte *WrappedOpenGL::glGetString(GLenum name)
 	{
 		return (const GLubyte *)GetCtxData().glExtsString.c_str();
 	}
+	else if(name == eGL_DEBUG_TOOL_NAME_EXT)
+	{
+		return (const GLubyte *)"RenderDoc";
+	}
 	return m_Real.glGetString(name);
 }
 
@@ -488,6 +522,10 @@ const GLubyte *WrappedOpenGL::glGetStringi(GLenum name, GLuint i)
 			return (const GLubyte *)GetCtxData().glExts[i].c_str();
 
 		return (const GLubyte *)"";
+	}
+	else if(name == eGL_DEBUG_TOOL_NAME_EXT)
+	{
+		return (const GLubyte *)"RenderDoc";
 	}
 	return m_Real.glGetStringi(name, i);
 }
@@ -530,6 +568,11 @@ void WrappedOpenGL::glGetMultisamplefv(GLenum pname, GLuint index, GLfloat *val)
 void WrappedOpenGL::glGetObjectLabel(GLenum identifier, GLuint name, GLsizei bufSize, GLsizei *length, GLchar *label)
 {
 	m_Real.glGetObjectLabel(identifier, name, bufSize, length, label);
+}
+
+void WrappedOpenGL::glGetObjectLabelEXT(GLenum identifier, GLuint name, GLsizei bufSize, GLsizei *length, GLchar *label)
+{
+	m_Real.glGetObjectLabelEXT(identifier, name, bufSize, length, label);
 }
 
 void WrappedOpenGL::glGetObjectPtrLabel(const void *ptr, GLsizei bufSize, GLsizei *length, GLchar *label)
@@ -897,7 +940,7 @@ void WrappedOpenGL::glGetNamedBufferSubDataEXT(GLuint buffer, GLintptr offset, G
 	m_Real.glGetNamedBufferSubDataEXT(buffer, offset, size, data);
 }
 
-void WrappedOpenGL::glGetNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizei size, void *data)
+void WrappedOpenGL::glGetNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr size, void *data)
 {
 	CoherentMapImplicitBarrier();
 	

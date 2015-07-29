@@ -65,11 +65,36 @@ struct FeedbackInitialData
 	uint64_t Size[4];
 };
 
+struct FramebufferAttachmentData
+{
+	bool renderbuffer;
+	bool layered;
+	int32_t layer;
+	int32_t level;
+	ResourceId obj;
+};
+
 struct FramebufferInitialData
 {
 	bool valid;
+	FramebufferAttachmentData Attachments[10];
 	GLenum DrawBuffers[8];
 	GLenum ReadBuffer;
+
+	static const GLenum attachmentNames[10];
+};
+
+const GLenum FramebufferInitialData::attachmentNames[10] = {
+	eGL_COLOR_ATTACHMENT0,
+	eGL_COLOR_ATTACHMENT1,
+	eGL_COLOR_ATTACHMENT2,
+	eGL_COLOR_ATTACHMENT3,
+	eGL_COLOR_ATTACHMENT4,
+	eGL_COLOR_ATTACHMENT5,
+	eGL_COLOR_ATTACHMENT6,
+	eGL_COLOR_ATTACHMENT7,
+	eGL_DEPTH_ATTACHMENT,
+	eGL_STENCIL_ATTACHMENT,
 };
 
 template<>
@@ -106,11 +131,24 @@ void Serialiser::Serialise(const char *name, FeedbackInitialData &el)
 }
 
 template<>
+void Serialiser::Serialise(const char *name, FramebufferAttachmentData &el)
+{
+	ScopedContext scope(this, this, name, "FramebufferAttachmentData", 0, true);
+	Serialise("renderbuffer", el.renderbuffer);
+	Serialise("layered", el.layered);
+	Serialise("layer", el.layer);
+	Serialise("level", el.level);
+	Serialise("obj", el.obj);
+}
+
+template<>
 void Serialiser::Serialise(const char *name, FramebufferInitialData &el)
 {
 	ScopedContext scope(this, this, name, "FramebufferInitialData", 0, true);
 	Serialise("valid", el.valid);
 	Serialise<8>("DrawBuffers", el.DrawBuffers);
+	for(size_t i=0; i < ARRAY_COUNT(el.Attachments); i++)
+		Serialise("Attachments", el.Attachments[i]);
 	Serialise("ReadBuffer", el.ReadBuffer);
 }
 
@@ -156,6 +194,79 @@ void Serialiser::Serialise(const char *name, TextureStateInitialData &el)
 	Serialise("texBufSize", el.texBufSize);
 }
 
+void GLResourceManager::MarkVAOReferenced(GLResource res, FrameRefType ref)
+{
+	const GLHookSet &gl = m_GL->m_Real;
+
+	if(res.name)
+	{
+		MarkResourceFrameReferenced(res, ref == eFrameRef_Unknown ? eFrameRef_Unknown : eFrameRef_Read);
+
+		GLint numVBufferBindings = 16;
+		gl.glGetIntegerv(eGL_MAX_VERTEX_ATTRIB_BINDINGS, &numVBufferBindings);
+
+		for(GLuint i=0; i < (GLuint)numVBufferBindings; i++)
+		{
+			GLuint buffer = GetBoundVertexBuffer(gl, i);
+
+			MarkResourceFrameReferenced(BufferRes(res.Context, buffer), ref);
+		}
+
+		GLuint ibuffer = 0;
+		gl.glGetIntegerv(eGL_ELEMENT_ARRAY_BUFFER_BINDING, (GLint*)&ibuffer);
+		MarkResourceFrameReferenced(BufferRes(res.Context, ibuffer), ref);
+	}
+}
+
+void GLResourceManager::MarkFBOReferenced(GLResource res, FrameRefType ref)
+{
+	if(res.name == 0)
+		return;
+	
+	MarkResourceFrameReferenced(res, ref == eFrameRef_Unknown ? eFrameRef_Unknown : eFrameRef_Read);
+
+	const GLHookSet &gl = m_GL->m_Real;
+
+	GLint numCols = 8;
+	gl.glGetIntegerv(eGL_MAX_COLOR_ATTACHMENTS, &numCols);
+
+	GLenum type = eGL_TEXTURE;
+	GLuint name = 0;
+
+	for(int c=0; c < numCols; c++)
+	{
+		gl.glGetNamedFramebufferAttachmentParameterivEXT(res.name, GLenum(eGL_COLOR_ATTACHMENT0+c), eGL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, (GLint*)&name);
+		gl.glGetNamedFramebufferAttachmentParameterivEXT(res.name, GLenum(eGL_COLOR_ATTACHMENT0+c), eGL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, (GLint*)&type);
+
+		if(type == eGL_RENDERBUFFER)
+			MarkResourceFrameReferenced(RenderbufferRes(res.Context, name), ref);
+		else
+			MarkResourceFrameReferenced(TextureRes(res.Context, name), ref);
+	}
+
+	gl.glGetNamedFramebufferAttachmentParameterivEXT(res.name, eGL_DEPTH_ATTACHMENT, eGL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, (GLint*)&name);
+	gl.glGetNamedFramebufferAttachmentParameterivEXT(res.name, eGL_DEPTH_ATTACHMENT, eGL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, (GLint*)&type);
+
+	if(name)
+	{
+		if(type == eGL_RENDERBUFFER)
+			MarkResourceFrameReferenced(RenderbufferRes(res.Context, name), ref);
+		else
+			MarkResourceFrameReferenced(TextureRes(res.Context, name), ref);
+	}
+
+	gl.glGetNamedFramebufferAttachmentParameterivEXT(res.name, eGL_STENCIL_ATTACHMENT, eGL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, (GLint*)&name);
+	gl.glGetNamedFramebufferAttachmentParameterivEXT(res.name, eGL_STENCIL_ATTACHMENT, eGL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, (GLint*)&type);
+
+	if(name)
+	{
+		if(type == eGL_RENDERBUFFER)
+			MarkResourceFrameReferenced(RenderbufferRes(res.Context, name), ref);
+		else
+			MarkResourceFrameReferenced(TextureRes(res.Context, name), ref);
+	}
+}
+
 bool GLResourceManager::SerialisableResource(ResourceId id, GLResourceRecord *record)
 {
 	if(id == m_GL->GetContextResourceID())
@@ -184,6 +295,25 @@ bool GLResourceManager::Prepare_InitialState(GLResource res, byte *blob)
 
 		gl.glBindFramebuffer(eGL_DRAW_FRAMEBUFFER, res.name);
 		gl.glBindFramebuffer(eGL_READ_FRAMEBUFFER, res.name);
+
+		//need to serialise out which objects are bound
+		GLenum type;
+		GLuint object;
+		GLint layered;
+		for(int i=0; i < (int)ARRAY_COUNT(data->Attachments); i++)
+		{
+			FramebufferAttachmentData &a = data->Attachments[i];
+
+			gl.glGetNamedFramebufferAttachmentParameterivEXT(res.name, data->attachmentNames[i], eGL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, (GLint*)&object);
+			gl.glGetNamedFramebufferAttachmentParameterivEXT(res.name, data->attachmentNames[i], eGL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, (GLint*)&type);
+			gl.glGetNamedFramebufferAttachmentParameterivEXT(res.name, data->attachmentNames[i], eGL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL, &a.level);
+			gl.glGetNamedFramebufferAttachmentParameterivEXT(res.name, data->attachmentNames[i], eGL_FRAMEBUFFER_ATTACHMENT_LAYERED, &layered);
+			gl.glGetNamedFramebufferAttachmentParameterivEXT(res.name, data->attachmentNames[i], eGL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER, &a.layer);
+
+			a.layered = (layered != 0);
+			a.renderbuffer = (type == eGL_RENDERBUFFER);
+			a.obj = GetID(a.renderbuffer ? RenderbufferRes(res.Context, object) : TextureRes(res.Context, object));
+		}
 
 		for(int i=0; i < (int)ARRAY_COUNT(data->DrawBuffers); i++)
 			gl.glGetIntegerv(GLenum(eGL_DRAW_BUFFER0 + i), (GLint *)&data->DrawBuffers[i]);
@@ -293,13 +423,21 @@ bool GLResourceManager::Prepare_InitialState(GLResource res)
 	else if(res.Namespace == eResTexture)
 	{
 		WrappedOpenGL::TextureData &details = m_GL->m_Textures[Id];
-		GLenum binding = TextureBinding(details.curType);
 		
 		TextureStateInitialData *state = (TextureStateInitialData *)Serialiser::AllocAlignedBuffer(sizeof(TextureStateInitialData));
 		RDCEraseMem(state, sizeof(TextureStateInitialData));
-		
-		if(details.curType != eGL_TEXTURE_BUFFER)
+
+		if(details.internalFormat == eGL_NONE)
 		{
+			// textures can get here as GL_NONE if they were created and dirtied (by setting lots of
+			// texture parameters) without ever having storage allocated (via glTexStorage or glTexImage).
+			// in that case, just ignore as we won't bother with the initial states.
+			SetInitialContents(Id, InitialContentData(GLResource(MakeNullResource), 0, (byte *)state));
+		}
+		else if(details.curType != eGL_TEXTURE_BUFFER)
+		{
+			GLenum binding = TextureBinding(details.curType);
+		
 			bool ms = (details.curType == eGL_TEXTURE_2D_MULTISAMPLE || details.curType == eGL_TEXTURE_2D_MULTISAMPLE_ARRAY);
 
 			state->depthMode = eGL_NONE;
@@ -638,6 +776,10 @@ bool GLResourceManager::Prepare_InitialState(GLResource res)
 			Prepare_InitialState(res, (byte *)data);
 		}
 	}
+	else if(res.Namespace == eResRenderbuffer)
+	{
+		//
+	}
 	else
 	{
 		RDCERR("Unexpected type of resource requiring initial state");
@@ -748,275 +890,238 @@ bool GLResourceManager::Serialise_InitialState(GLResource res)
 		{
 			WrappedOpenGL::TextureData &details = m_GL->m_Textures[Id];
 
-			GLuint tex = GetInitialContents(Id).resource.name;
-
-			GLuint ppb = 0;
-			gl.glGetIntegerv(eGL_PIXEL_PACK_BUFFER_BINDING, (GLint *)&ppb);
-			gl.glBindBuffer(eGL_PIXEL_PACK_BUFFER, 0);
-
-			GLint packParams[8];
-			gl.glGetIntegerv(eGL_PACK_SWAP_BYTES, &packParams[0]);
-			gl.glGetIntegerv(eGL_PACK_LSB_FIRST, &packParams[1]);
-			gl.glGetIntegerv(eGL_PACK_ROW_LENGTH, &packParams[2]);
-			gl.glGetIntegerv(eGL_PACK_IMAGE_HEIGHT, &packParams[3]);
-			gl.glGetIntegerv(eGL_PACK_SKIP_PIXELS, &packParams[4]);
-			gl.glGetIntegerv(eGL_PACK_SKIP_ROWS, &packParams[5]);
-			gl.glGetIntegerv(eGL_PACK_SKIP_IMAGES, &packParams[6]);
-			gl.glGetIntegerv(eGL_PACK_ALIGNMENT, &packParams[7]);
-
-			gl.glPixelStorei(eGL_PACK_SWAP_BYTES, 0);
-			gl.glPixelStorei(eGL_PACK_LSB_FIRST, 0);
-			gl.glPixelStorei(eGL_PACK_ROW_LENGTH, 0);
-			gl.glPixelStorei(eGL_PACK_IMAGE_HEIGHT, 0);
-			gl.glPixelStorei(eGL_PACK_SKIP_PIXELS, 0);
-			gl.glPixelStorei(eGL_PACK_SKIP_ROWS, 0);
-			gl.glPixelStorei(eGL_PACK_SKIP_IMAGES, 0);
-			gl.glPixelStorei(eGL_PACK_ALIGNMENT, 1);
-			
-			GLint isComp = 0;
-			
-			GLenum queryType = details.curType;
-			if(queryType == eGL_TEXTURE_CUBE_MAP)
-				queryType = eGL_TEXTURE_CUBE_MAP_POSITIVE_X;
-
-			gl.glGetTextureLevelParameterivEXT(res.name, queryType, 0, eGL_TEXTURE_COMPRESSED, &isComp);
-			
-			int imgmips = GetNumMips(gl, details.curType, tex, details.width, details.height, details.depth);
-			
-			TextureStateInitialData *state = (TextureStateInitialData *)GetInitialContents(Id).blob;
-
-			SERIALISE_ELEMENT(TextureStateInitialData, stateData, *state);
-
-			SERIALISE_ELEMENT(uint32_t, width, details.width);
-			SERIALISE_ELEMENT(uint32_t, height, details.height);
-			SERIALISE_ELEMENT(uint32_t, depth, details.depth);
-			SERIALISE_ELEMENT(uint32_t, samples, details.samples);
-			SERIALISE_ELEMENT(uint32_t, dim, details.dimension);
-			SERIALISE_ELEMENT(GLenum, t, details.curType);
 			SERIALISE_ELEMENT(GLenum, f, details.internalFormat);
-			SERIALISE_ELEMENT(int, mips, imgmips);
-			
-			SERIALISE_ELEMENT(bool, isCompressed, isComp != 0);
 
-			if(details.curType == eGL_TEXTURE_BUFFER)
+			// only continue with the rest if the format is valid (storage allocated)
+			if(f != eGL_NONE)
 			{
-				// no contents to copy for texture buffer (it's copied under the buffer)
-			}
-			else if(isCompressed)
-			{
-				for(int i=0; i < mips; i++)
-				{
-					GLenum targets[] = {
-						eGL_TEXTURE_CUBE_MAP_POSITIVE_X,
-						eGL_TEXTURE_CUBE_MAP_NEGATIVE_X,
-						eGL_TEXTURE_CUBE_MAP_POSITIVE_Y,
-						eGL_TEXTURE_CUBE_MAP_NEGATIVE_Y,
-						eGL_TEXTURE_CUBE_MAP_POSITIVE_Z,
-						eGL_TEXTURE_CUBE_MAP_NEGATIVE_Z,
-					};
+				GLuint tex = GetInitialContents(Id).resource.name;
 
-					int count = ARRAY_COUNT(targets);
-						
-					if(t != eGL_TEXTURE_CUBE_MAP)
-					{
-						targets[0] = details.curType;
-						count = 1;
-					}
+				GLuint ppb = 0;
+				gl.glGetIntegerv(eGL_PIXEL_PACK_BUFFER_BINDING, (GLint *)&ppb);
+				gl.glBindBuffer(eGL_PIXEL_PACK_BUFFER, 0);
 
-					for(int trg=0; trg < count; trg++)
-					{
-						GLint compSize;
-						gl.glGetTextureLevelParameterivEXT(tex, targets[trg], i, eGL_TEXTURE_COMPRESSED_IMAGE_SIZE, &compSize);
+				GLint packParams[8];
+				gl.glGetIntegerv(eGL_PACK_SWAP_BYTES, &packParams[0]);
+				gl.glGetIntegerv(eGL_PACK_LSB_FIRST, &packParams[1]);
+				gl.glGetIntegerv(eGL_PACK_ROW_LENGTH, &packParams[2]);
+				gl.glGetIntegerv(eGL_PACK_IMAGE_HEIGHT, &packParams[3]);
+				gl.glGetIntegerv(eGL_PACK_SKIP_PIXELS, &packParams[4]);
+				gl.glGetIntegerv(eGL_PACK_SKIP_ROWS, &packParams[5]);
+				gl.glGetIntegerv(eGL_PACK_SKIP_IMAGES, &packParams[6]);
+				gl.glGetIntegerv(eGL_PACK_ALIGNMENT, &packParams[7]);
 
-						size_t size = compSize;
-
-						// sometimes cubemaps return the compressed image size for the whole texture, but we read it
-						// face by face
-						if(VendorCheck[VendorCheck_EXT_compressed_cube_size] && t == eGL_TEXTURE_CUBE_MAP)
-							size /= 6;
-
-						byte *buf = new byte[size];
-
-						gl.glGetCompressedTextureImageEXT(tex, targets[trg], i, buf);
-
-						m_pSerialiser->SerialiseBuffer("image", buf, size);
-
-						delete[] buf;
-					}
-				}
-			}
-			else if(samples > 1)
-			{
-				GLNOTIMP("Not implemented - initial states of multisampled textures");
-			}
-			else
-			{
-				GLenum fmt = GetBaseFormat(details.internalFormat);
-				GLenum type = GetDataType(details.internalFormat);
-					
-				size_t size = GetByteSize(details.width, details.height, details.depth, fmt, type);
-
-				byte *buf = new byte[size];
-
-				GLenum binding = TextureBinding(t);
-
-				GLuint prevtex = 0;
-				gl.glGetIntegerv(binding, (GLint *)&prevtex);
-
-				gl.glBindTexture(t, tex);
-
-				for(int i=0; i < mips; i++)
-				{
-					int w = RDCMAX(details.width>>i, 1);
-					int h = RDCMAX(details.height>>i, 1);
-					int d = RDCMAX(details.depth>>i, 1);
-					
-					if(t == eGL_TEXTURE_CUBE_MAP_ARRAY ||
-						 t == eGL_TEXTURE_1D_ARRAY ||
-						 t == eGL_TEXTURE_2D_ARRAY)
-						d = details.depth;
-
-					size = GetByteSize(w, h, d, fmt, type);
-					
-					GLenum targets[] = {
-						eGL_TEXTURE_CUBE_MAP_POSITIVE_X,
-						eGL_TEXTURE_CUBE_MAP_NEGATIVE_X,
-						eGL_TEXTURE_CUBE_MAP_POSITIVE_Y,
-						eGL_TEXTURE_CUBE_MAP_NEGATIVE_Y,
-						eGL_TEXTURE_CUBE_MAP_POSITIVE_Z,
-						eGL_TEXTURE_CUBE_MAP_NEGATIVE_Z,
-					};
-
-					int count = ARRAY_COUNT(targets);
-						
-					if(t != eGL_TEXTURE_CUBE_MAP)
-					{
-						targets[0] = t;
-						count = 1;
-					}
-
-					for(int trg=0; trg < count; trg++)
-					{
-						// we avoid glGetTextureImageEXT as it seems buggy for cubemap faces
-						gl.glGetTexImage(targets[trg], i, fmt, type, buf);
-
-						m_pSerialiser->SerialiseBuffer("image", buf, size);
-					}
-				}
+				gl.glPixelStorei(eGL_PACK_SWAP_BYTES, 0);
+				gl.glPixelStorei(eGL_PACK_LSB_FIRST, 0);
+				gl.glPixelStorei(eGL_PACK_ROW_LENGTH, 0);
+				gl.glPixelStorei(eGL_PACK_IMAGE_HEIGHT, 0);
+				gl.glPixelStorei(eGL_PACK_SKIP_PIXELS, 0);
+				gl.glPixelStorei(eGL_PACK_SKIP_ROWS, 0);
+				gl.glPixelStorei(eGL_PACK_SKIP_IMAGES, 0);
+				gl.glPixelStorei(eGL_PACK_ALIGNMENT, 1);
 				
-				gl.glBindTexture(t, prevtex);
+				GLint isComp = 0;
 
-				SAFE_DELETE_ARRAY(buf);
+				GLenum queryType = details.curType;
+				if(queryType == eGL_TEXTURE_CUBE_MAP)
+					queryType = eGL_TEXTURE_CUBE_MAP_POSITIVE_X;
+			
+				gl.glGetTextureLevelParameterivEXT(res.name, queryType, 0, eGL_TEXTURE_COMPRESSED, &isComp);
+
+				int imgmips = GetNumMips(gl, details.curType, tex, details.width, details.height, details.depth);
+
+				TextureStateInitialData *state = (TextureStateInitialData *)GetInitialContents(Id).blob;
+
+				SERIALISE_ELEMENT(TextureStateInitialData, stateData, *state);
+
+				SERIALISE_ELEMENT(uint32_t, width, details.width);
+				SERIALISE_ELEMENT(uint32_t, height, details.height);
+				SERIALISE_ELEMENT(uint32_t, depth, details.depth);
+				SERIALISE_ELEMENT(uint32_t, samples, details.samples);
+				SERIALISE_ELEMENT(uint32_t, dim, details.dimension);
+				SERIALISE_ELEMENT(GLenum, t, details.curType);
+				SERIALISE_ELEMENT(int, mips, imgmips);
+
+				SERIALISE_ELEMENT(bool, isCompressed, isComp != 0);
+
+				if(details.curType == eGL_TEXTURE_BUFFER)
+				{
+					// no contents to copy for texture buffer (it's copied under the buffer)
+				}
+				else if(isCompressed)
+				{
+					for(int i=0; i < mips; i++)
+					{
+						GLenum targets[] = {
+							eGL_TEXTURE_CUBE_MAP_POSITIVE_X,
+							eGL_TEXTURE_CUBE_MAP_NEGATIVE_X,
+							eGL_TEXTURE_CUBE_MAP_POSITIVE_Y,
+							eGL_TEXTURE_CUBE_MAP_NEGATIVE_Y,
+							eGL_TEXTURE_CUBE_MAP_POSITIVE_Z,
+							eGL_TEXTURE_CUBE_MAP_NEGATIVE_Z,
+						};
+
+						int count = ARRAY_COUNT(targets);
+
+						if(t != eGL_TEXTURE_CUBE_MAP)
+						{
+							targets[0] = details.curType;
+							count = 1;
+						}
+
+						for(int trg=0; trg < count; trg++)
+						{
+							GLint compSize;
+							gl.glGetTextureLevelParameterivEXT(tex, targets[trg], i, eGL_TEXTURE_COMPRESSED_IMAGE_SIZE, &compSize);
+
+							size_t size = compSize;
+
+							// sometimes cubemaps return the compressed image size for the whole texture, but we read it
+							// face by face
+							if(VendorCheck[VendorCheck_EXT_compressed_cube_size] && t == eGL_TEXTURE_CUBE_MAP)
+								size /= 6;
+
+							byte *buf = new byte[size];
+
+							gl.glGetCompressedTextureImageEXT(tex, targets[trg], i, buf);
+
+							m_pSerialiser->SerialiseBuffer("image", buf, size);
+
+							delete[] buf;
+						}
+					}
+				}
+				else if(samples > 1)
+				{
+					GLNOTIMP("Not implemented - initial states of multisampled textures");
+				}
+				else
+				{
+					GLenum fmt = GetBaseFormat(details.internalFormat);
+					GLenum type = GetDataType(details.internalFormat);
+
+					size_t size = GetByteSize(details.width, details.height, details.depth, fmt, type);
+
+					byte *buf = new byte[size];
+
+					GLenum binding = TextureBinding(t);
+
+					GLuint prevtex = 0;
+					gl.glGetIntegerv(binding, (GLint *)&prevtex);
+
+					gl.glBindTexture(t, tex);
+
+					for(int i=0; i < mips; i++)
+					{
+						int w = RDCMAX(details.width>>i, 1);
+						int h = RDCMAX(details.height>>i, 1);
+						int d = RDCMAX(details.depth>>i, 1);
+
+						if(t == eGL_TEXTURE_CUBE_MAP_ARRAY ||
+							t == eGL_TEXTURE_1D_ARRAY ||
+							t == eGL_TEXTURE_2D_ARRAY)
+							d = details.depth;
+
+						size = GetByteSize(w, h, d, fmt, type);
+
+						GLenum targets[] = {
+							eGL_TEXTURE_CUBE_MAP_POSITIVE_X,
+							eGL_TEXTURE_CUBE_MAP_NEGATIVE_X,
+							eGL_TEXTURE_CUBE_MAP_POSITIVE_Y,
+							eGL_TEXTURE_CUBE_MAP_NEGATIVE_Y,
+							eGL_TEXTURE_CUBE_MAP_POSITIVE_Z,
+							eGL_TEXTURE_CUBE_MAP_NEGATIVE_Z,
+						};
+
+						int count = ARRAY_COUNT(targets);
+
+						if(t != eGL_TEXTURE_CUBE_MAP)
+						{
+							targets[0] = t;
+							count = 1;
+						}
+
+						for(int trg=0; trg < count; trg++)
+						{
+							// we avoid glGetTextureImageEXT as it seems buggy for cubemap faces
+							gl.glGetTexImage(targets[trg], i, fmt, type, buf);
+
+							m_pSerialiser->SerialiseBuffer("image", buf, size);
+						}
+					}
+
+					gl.glBindTexture(t, prevtex);
+
+					SAFE_DELETE_ARRAY(buf);
+				}
+
+				gl.glBindBuffer(eGL_PIXEL_PACK_BUFFER, ppb);
+
+				gl.glPixelStorei(eGL_PACK_SWAP_BYTES, packParams[0]);
+				gl.glPixelStorei(eGL_PACK_LSB_FIRST, packParams[1]);
+				gl.glPixelStorei(eGL_PACK_ROW_LENGTH, packParams[2]);
+				gl.glPixelStorei(eGL_PACK_IMAGE_HEIGHT, packParams[3]);
+				gl.glPixelStorei(eGL_PACK_SKIP_PIXELS, packParams[4]);
+				gl.glPixelStorei(eGL_PACK_SKIP_ROWS, packParams[5]);
+				gl.glPixelStorei(eGL_PACK_SKIP_IMAGES, packParams[6]);
+				gl.glPixelStorei(eGL_PACK_ALIGNMENT, packParams[7]);
 			}
-
-			gl.glBindBuffer(eGL_PIXEL_PACK_BUFFER, ppb);
-
-			gl.glPixelStorei(eGL_PACK_SWAP_BYTES, packParams[0]);
-			gl.glPixelStorei(eGL_PACK_LSB_FIRST, packParams[1]);
-			gl.glPixelStorei(eGL_PACK_ROW_LENGTH, packParams[2]);
-			gl.glPixelStorei(eGL_PACK_IMAGE_HEIGHT, packParams[3]);
-			gl.glPixelStorei(eGL_PACK_SKIP_PIXELS, packParams[4]);
-			gl.glPixelStorei(eGL_PACK_SKIP_ROWS, packParams[5]);
-			gl.glPixelStorei(eGL_PACK_SKIP_IMAGES, packParams[6]);
-			gl.glPixelStorei(eGL_PACK_ALIGNMENT, packParams[7]);
 		}
 		else
 		{
-			GLuint pub = 0;
-			gl.glGetIntegerv(eGL_PIXEL_UNPACK_BUFFER_BINDING, (GLint *)&pub);
-			gl.glBindBuffer(eGL_PIXEL_UNPACK_BUFFER, 0);
-
-			GLint unpackParams[8];
-			gl.glGetIntegerv(eGL_UNPACK_SWAP_BYTES, &unpackParams[0]);
-			gl.glGetIntegerv(eGL_UNPACK_LSB_FIRST, &unpackParams[1]);
-			gl.glGetIntegerv(eGL_UNPACK_ROW_LENGTH, &unpackParams[2]);
-			gl.glGetIntegerv(eGL_UNPACK_IMAGE_HEIGHT, &unpackParams[3]);
-			gl.glGetIntegerv(eGL_UNPACK_SKIP_PIXELS, &unpackParams[4]);
-			gl.glGetIntegerv(eGL_UNPACK_SKIP_ROWS, &unpackParams[5]);
-			gl.glGetIntegerv(eGL_UNPACK_SKIP_IMAGES, &unpackParams[6]);
-			gl.glGetIntegerv(eGL_UNPACK_ALIGNMENT, &unpackParams[7]);
-
-			gl.glPixelStorei(eGL_UNPACK_SWAP_BYTES, 0);
-			gl.glPixelStorei(eGL_UNPACK_LSB_FIRST, 0);
-			gl.glPixelStorei(eGL_UNPACK_ROW_LENGTH, 0);
-			gl.glPixelStorei(eGL_UNPACK_IMAGE_HEIGHT, 0);
-			gl.glPixelStorei(eGL_UNPACK_SKIP_PIXELS, 0);
-			gl.glPixelStorei(eGL_UNPACK_SKIP_ROWS, 0);
-			gl.glPixelStorei(eGL_UNPACK_SKIP_IMAGES, 0);
-			gl.glPixelStorei(eGL_UNPACK_ALIGNMENT, 1);
-
-			TextureStateInitialData *state = (TextureStateInitialData *)Serialiser::AllocAlignedBuffer(sizeof(TextureStateInitialData));
-			RDCEraseMem(state, sizeof(TextureStateInitialData));
-
-			m_pSerialiser->Serialise("state", *state);
-
-			SERIALISE_ELEMENT(uint32_t, width, 0);
-			SERIALISE_ELEMENT(uint32_t, height, 0);
-			SERIALISE_ELEMENT(uint32_t, depth, 0);
-			SERIALISE_ELEMENT(uint32_t, samples, 0);
-			SERIALISE_ELEMENT(uint32_t, dim, 0);
-			SERIALISE_ELEMENT(GLenum, textype, eGL_NONE);
 			SERIALISE_ELEMENT(GLenum, internalformat, eGL_NONE);
-			SERIALISE_ELEMENT(int, mips, 0);
-			SERIALISE_ELEMENT(bool, isCompressed, false);
-			
-			GLuint tex = 0;
-			
-			if(textype != eGL_TEXTURE_BUFFER)
-			{
-				GLuint prevtex = 0;
-				gl.glGetIntegerv(TextureBinding(textype), (GLint *)&prevtex);
-				
-				gl.glGenTextures(1, &tex);
-				gl.glBindTexture(textype, tex);
-				
-				gl.glBindTexture(textype, prevtex);
-			}
 
-			// create texture of identical format/size to store initial contents
-			if(textype == eGL_TEXTURE_BUFFER)
+			if(internalformat != eGL_NONE)
 			{
-				// no 'contents' texture to create
-			}
-			else if(textype == eGL_TEXTURE_2D_MULTISAMPLE)
-			{
-				gl.glTextureStorage2DMultisampleEXT(tex, textype, samples, internalformat, width, height, GL_TRUE);
-				mips = 1;
-			}
-			else if(textype == eGL_TEXTURE_2D_MULTISAMPLE_ARRAY)
-			{
-				gl.glTextureStorage3DMultisampleEXT(tex, textype, samples, internalformat, width, height, depth, GL_TRUE);
-				mips = 1;
-			}
-			else if(dim == 1)
-			{
-				gl.glTextureStorage1DEXT(tex, textype, mips, internalformat, width);
-			}
-			else if(dim == 2)
-			{
-				gl.glTextureStorage2DEXT(tex, textype, mips, internalformat, width, height);
-			}
-			else if(dim == 3)
-			{
-				gl.glTextureStorage3DEXT(tex, textype, mips, internalformat, width, height, depth);
-			}
+				GLuint pub = 0;
+				gl.glGetIntegerv(eGL_PIXEL_UNPACK_BUFFER_BINDING, (GLint *)&pub);
+				gl.glBindBuffer(eGL_PIXEL_UNPACK_BUFFER, 0);
 
-			if(textype == eGL_TEXTURE_BUFFER)
-			{
-				// no contents to serialise
-			}
-			else if(isCompressed)
-			{
-				for(int i=0; i < mips; i++)
+				GLint unpackParams[8];
+				gl.glGetIntegerv(eGL_UNPACK_SWAP_BYTES, &unpackParams[0]);
+				gl.glGetIntegerv(eGL_UNPACK_LSB_FIRST, &unpackParams[1]);
+				gl.glGetIntegerv(eGL_UNPACK_ROW_LENGTH, &unpackParams[2]);
+				gl.glGetIntegerv(eGL_UNPACK_IMAGE_HEIGHT, &unpackParams[3]);
+				gl.glGetIntegerv(eGL_UNPACK_SKIP_PIXELS, &unpackParams[4]);
+				gl.glGetIntegerv(eGL_UNPACK_SKIP_ROWS, &unpackParams[5]);
+				gl.glGetIntegerv(eGL_UNPACK_SKIP_IMAGES, &unpackParams[6]);
+				gl.glGetIntegerv(eGL_UNPACK_ALIGNMENT, &unpackParams[7]);
+
+				gl.glPixelStorei(eGL_UNPACK_SWAP_BYTES, 0);
+				gl.glPixelStorei(eGL_UNPACK_LSB_FIRST, 0);
+				gl.glPixelStorei(eGL_UNPACK_ROW_LENGTH, 0);
+				gl.glPixelStorei(eGL_UNPACK_IMAGE_HEIGHT, 0);
+				gl.glPixelStorei(eGL_UNPACK_SKIP_PIXELS, 0);
+				gl.glPixelStorei(eGL_UNPACK_SKIP_ROWS, 0);
+				gl.glPixelStorei(eGL_UNPACK_SKIP_IMAGES, 0);
+				gl.glPixelStorei(eGL_UNPACK_ALIGNMENT, 1);
+
+				TextureStateInitialData *state = (TextureStateInitialData *)Serialiser::AllocAlignedBuffer(sizeof(TextureStateInitialData));
+				RDCEraseMem(state, sizeof(TextureStateInitialData));
+
+				m_pSerialiser->Serialise("state", *state);
+
+				SERIALISE_ELEMENT(uint32_t, width, 0);
+				SERIALISE_ELEMENT(uint32_t, height, 0);
+				SERIALISE_ELEMENT(uint32_t, depth, 0);
+				SERIALISE_ELEMENT(uint32_t, samples, 0);
+				SERIALISE_ELEMENT(uint32_t, dim, 0);
+				SERIALISE_ELEMENT(GLenum, textype, eGL_NONE);
+				SERIALISE_ELEMENT(int, mips, 0);
+				SERIALISE_ELEMENT(bool, isCompressed, false);
+
+				// if number of mips isn't sufficient, make sure to initialise
+				// the lower levels - this could happen if e.g. a texture is
+				// init'd with glTexImage(level = 0), then after we stop tracking
+				// it glGenerateMipmap is called
 				{
-					uint32_t w = RDCMAX(width>>i, 1U);
-					uint32_t h = RDCMAX(height>>i, 1U);
-					uint32_t d = RDCMAX(depth>>i, 1U);
-						
-					if(textype == eGL_TEXTURE_CUBE_MAP_ARRAY ||
-						 textype == eGL_TEXTURE_1D_ARRAY ||
-						 textype == eGL_TEXTURE_2D_ARRAY)
-						d = depth;
+					GLuint live = GetLiveResource(Id).name;
+
+					GLsizei w = (GLsizei)width;
+					GLsizei h = (GLsizei)height;
+					GLsizei d = (GLsizei)depth;
+
+					int liveMips = GetNumMips(gl, textype, live, width, height, depth);
 
 					GLenum targets[] = {
 						eGL_TEXTURE_CUBE_MAP_POSITIVE_X,
@@ -1028,101 +1133,226 @@ bool GLResourceManager::Serialise_InitialState(GLResource res)
 					};
 
 					int count = ARRAY_COUNT(targets);
-						
+
 					if(textype != eGL_TEXTURE_CUBE_MAP)
 					{
 						targets[0] = textype;
 						count = 1;
 					}
 
-					for(int trg=0; trg < count; trg++)
+					for(int m = 1; m < mips; m++)
 					{
-						size_t size = 0;
-						byte *buf = NULL;
+						w = RDCMAX(1, w >> 1);
+						h = RDCMAX(1, h >> 1);
+						d = RDCMAX(1, d >> 1);
 
-						m_pSerialiser->SerialiseBuffer("image", buf, size);
+						if(textype == eGL_TEXTURE_CUBE_MAP_ARRAY ||
+							textype == eGL_TEXTURE_1D_ARRAY ||
+							textype == eGL_TEXTURE_2D_ARRAY)
+							d = (GLsizei)depth;
 
-						if(dim == 1)
-							gl.glCompressedTextureSubImage1DEXT(tex, targets[trg], i, 0, w, internalformat, (GLsizei)size, buf);
-						else if(dim == 2)
-							gl.glCompressedTextureSubImage2DEXT(tex, targets[trg], i, 0, 0, w, h, internalformat, (GLsizei)size, buf);
-						else if(dim == 3)
-							gl.glCompressedTextureSubImage3DEXT(tex, targets[trg], i, 0, 0, 0, w, h, d, internalformat, (GLsizei)size, buf);
+						if(m >= liveMips)
+						{
+							for(int t=0; t < count; t++)
+							{
+								if(isCompressed)
+								{
+									GLsizei compSize = (GLsizei)GetCompressedByteSize(w, h, d, internalformat, m);
 
-						delete[] buf;
+									vector<byte> dummy;
+									dummy.resize(compSize);
+
+									if(dim == 1)
+										gl.glCompressedTextureImage1DEXT(live, targets[t], m, internalformat, w, 0, compSize, &dummy[0]);
+									else if(dim == 2)
+										gl.glCompressedTextureImage2DEXT(live, targets[t], m, internalformat, w, h, 0, compSize, &dummy[0]);
+									else if(dim == 3)
+										gl.glCompressedTextureImage3DEXT(live, targets[t], m, internalformat, w, h, d, 0, compSize, &dummy[0]);
+								}
+								else
+								{
+									if(dim == 1)
+										gl.glTextureImage1DEXT(live, targets[t], m, internalformat, (GLsizei)w, 0,
+																					 GetBaseFormat(internalformat), GetDataType(internalformat), NULL);
+									else if(dim == 2)
+										gl.glTextureImage2DEXT(live, targets[t], m, internalformat, (GLsizei)w, (GLsizei)h, 0,
+																					 GetBaseFormat(internalformat), GetDataType(internalformat), NULL);
+									else if(dim == 3)
+										gl.glTextureImage3DEXT(live, targets[t], m, internalformat, (GLsizei)w, (GLsizei)h, (GLsizei)d, 0,
+																					 GetBaseFormat(internalformat), GetDataType(internalformat), NULL);
+								}
+							}
+						}
 					}
 				}
-			}
-			else if(samples > 1)
-			{
-				GLNOTIMP("Not implemented - initial states of multisampled textures");
-			}
-			else
-			{
-				GLenum fmt = GetBaseFormat(internalformat);
-				GLenum type = GetDataType(internalformat);
 
-				for(int i=0; i < mips; i++)
+				GLuint tex = 0;
+
+				if(textype != eGL_TEXTURE_BUFFER)
 				{
-					uint32_t w = RDCMAX(width>>i, 1U);
-					uint32_t h = RDCMAX(height>>i, 1U);
-					uint32_t d = RDCMAX(depth>>i, 1U);
-					
-					if(textype == eGL_TEXTURE_CUBE_MAP_ARRAY ||
-						 textype == eGL_TEXTURE_1D_ARRAY ||
-						 textype == eGL_TEXTURE_2D_ARRAY)
-						d = depth;
-					
-					GLenum targets[] = {
-						eGL_TEXTURE_CUBE_MAP_POSITIVE_X,
-						eGL_TEXTURE_CUBE_MAP_NEGATIVE_X,
-						eGL_TEXTURE_CUBE_MAP_POSITIVE_Y,
-						eGL_TEXTURE_CUBE_MAP_NEGATIVE_Y,
-						eGL_TEXTURE_CUBE_MAP_POSITIVE_Z,
-						eGL_TEXTURE_CUBE_MAP_NEGATIVE_Z,
-					};
+					GLuint prevtex = 0;
+					gl.glGetIntegerv(TextureBinding(textype), (GLint *)&prevtex);
 
-					int count = ARRAY_COUNT(targets);
-						
-					if(textype != eGL_TEXTURE_CUBE_MAP)
+					gl.glGenTextures(1, &tex);
+					gl.glBindTexture(textype, tex);
+
+					gl.glBindTexture(textype, prevtex);
+				}
+
+				GLenum dummy;
+				EmulateLuminanceFormat(gl, tex, textype, internalformat, dummy);
+
+				// create texture of identical format/size to store initial contents
+				if(textype == eGL_TEXTURE_BUFFER)
+				{
+					// no 'contents' texture to create
+				}
+				else if(textype == eGL_TEXTURE_2D_MULTISAMPLE)
+				{
+					gl.glTextureStorage2DMultisampleEXT(tex, textype, samples, internalformat, width, height, GL_TRUE);
+					mips = 1;
+				}
+				else if(textype == eGL_TEXTURE_2D_MULTISAMPLE_ARRAY)
+				{
+					gl.glTextureStorage3DMultisampleEXT(tex, textype, samples, internalformat, width, height, depth, GL_TRUE);
+					mips = 1;
+				}
+				else if(dim == 1)
+				{
+					gl.glTextureStorage1DEXT(tex, textype, mips, internalformat, width);
+				}
+				else if(dim == 2)
+				{
+					gl.glTextureStorage2DEXT(tex, textype, mips, internalformat, width, height);
+				}
+				else if(dim == 3)
+				{
+					gl.glTextureStorage3DEXT(tex, textype, mips, internalformat, width, height, depth);
+				}
+
+				if(textype == eGL_TEXTURE_BUFFER)
+				{
+					// no contents to serialise
+				}
+				else if(isCompressed)
+				{
+					for(int i=0; i < mips; i++)
 					{
-						targets[0] = textype;
-						count = 1;
-					}
-					
-					for(int trg=0; trg < count; trg++)
-					{
-						size_t size = 0;
-						byte *buf = NULL;
-						m_pSerialiser->SerialiseBuffer("image", buf, size);
+						uint32_t w = RDCMAX(width>>i, 1U);
+						uint32_t h = RDCMAX(height>>i, 1U);
+						uint32_t d = RDCMAX(depth>>i, 1U);
 
-						if(dim == 1)
-							gl.glTextureSubImage1DEXT(tex, targets[trg], i, 0, w, fmt, type, buf);
-						else if(dim == 2)
-							gl.glTextureSubImage2DEXT(tex, targets[trg], i, 0, 0, w, h, fmt, type, buf);
-						else if(dim == 3)
-							gl.glTextureSubImage3DEXT(tex, targets[trg], i, 0, 0, 0, w, h, d, fmt, type, buf);
+						if(textype == eGL_TEXTURE_CUBE_MAP_ARRAY ||
+							textype == eGL_TEXTURE_1D_ARRAY ||
+							textype == eGL_TEXTURE_2D_ARRAY)
+							d = depth;
 
-						delete[] buf;
+						GLenum targets[] = {
+							eGL_TEXTURE_CUBE_MAP_POSITIVE_X,
+							eGL_TEXTURE_CUBE_MAP_NEGATIVE_X,
+							eGL_TEXTURE_CUBE_MAP_POSITIVE_Y,
+							eGL_TEXTURE_CUBE_MAP_NEGATIVE_Y,
+							eGL_TEXTURE_CUBE_MAP_POSITIVE_Z,
+							eGL_TEXTURE_CUBE_MAP_NEGATIVE_Z,
+						};
+
+						int count = ARRAY_COUNT(targets);
+
+						if(textype != eGL_TEXTURE_CUBE_MAP)
+						{
+							targets[0] = textype;
+							count = 1;
+						}
+
+						for(int trg=0; trg < count; trg++)
+						{
+							size_t size = 0;
+							byte *buf = NULL;
+
+							m_pSerialiser->SerialiseBuffer("image", buf, size);
+
+							if(dim == 1)
+								gl.glCompressedTextureSubImage1DEXT(tex, targets[trg], i, 0, w, internalformat, (GLsizei)size, buf);
+							else if(dim == 2)
+								gl.glCompressedTextureSubImage2DEXT(tex, targets[trg], i, 0, 0, w, h, internalformat, (GLsizei)size, buf);
+							else if(dim == 3)
+								gl.glCompressedTextureSubImage3DEXT(tex, targets[trg], i, 0, 0, 0, w, h, d, internalformat, (GLsizei)size, buf);
+
+							delete[] buf;
+						}
 					}
 				}
+				else if(samples > 1)
+				{
+					GLNOTIMP("Not implemented - initial states of multisampled textures");
+				}
+				else
+				{
+					GLenum fmt = GetBaseFormat(internalformat);
+					GLenum type = GetDataType(internalformat);
+
+					for(int i=0; i < mips; i++)
+					{
+						uint32_t w = RDCMAX(width>>i, 1U);
+						uint32_t h = RDCMAX(height>>i, 1U);
+						uint32_t d = RDCMAX(depth>>i, 1U);
+
+						if(textype == eGL_TEXTURE_CUBE_MAP_ARRAY ||
+							textype == eGL_TEXTURE_1D_ARRAY ||
+							textype == eGL_TEXTURE_2D_ARRAY)
+							d = depth;
+
+						GLenum targets[] = {
+							eGL_TEXTURE_CUBE_MAP_POSITIVE_X,
+							eGL_TEXTURE_CUBE_MAP_NEGATIVE_X,
+							eGL_TEXTURE_CUBE_MAP_POSITIVE_Y,
+							eGL_TEXTURE_CUBE_MAP_NEGATIVE_Y,
+							eGL_TEXTURE_CUBE_MAP_POSITIVE_Z,
+							eGL_TEXTURE_CUBE_MAP_NEGATIVE_Z,
+						};
+
+						int count = ARRAY_COUNT(targets);
+
+						if(textype != eGL_TEXTURE_CUBE_MAP)
+						{
+							targets[0] = textype;
+							count = 1;
+						}
+
+						for(int trg=0; trg < count; trg++)
+						{
+							size_t size = 0;
+							byte *buf = NULL;
+							m_pSerialiser->SerialiseBuffer("image", buf, size);
+
+							if(dim == 1)
+								gl.glTextureSubImage1DEXT(tex, targets[trg], i, 0, w, fmt, type, buf);
+							else if(dim == 2)
+								gl.glTextureSubImage2DEXT(tex, targets[trg], i, 0, 0, w, h, fmt, type, buf);
+							else if(dim == 3)
+								gl.glTextureSubImage3DEXT(tex, targets[trg], i, 0, 0, 0, w, h, d, fmt, type, buf);
+
+							delete[] buf;
+						}
+					}
+				}
+
+				if(textype != eGL_TEXTURE_BUFFER)
+					SetInitialContents(Id, InitialContentData(TextureRes(m_GL->GetCtx(), tex), 0, (byte *)state));
+				else
+					SetInitialContents(Id, InitialContentData(GLResource(MakeNullResource), 0, (byte *)state));
+
+				gl.glBindBuffer(eGL_PIXEL_UNPACK_BUFFER, pub);
+
+				gl.glPixelStorei(eGL_UNPACK_SWAP_BYTES, unpackParams[0]);
+				gl.glPixelStorei(eGL_UNPACK_LSB_FIRST, unpackParams[1]);
+				gl.glPixelStorei(eGL_UNPACK_ROW_LENGTH, unpackParams[2]);
+				gl.glPixelStorei(eGL_UNPACK_IMAGE_HEIGHT, unpackParams[3]);
+				gl.glPixelStorei(eGL_UNPACK_SKIP_PIXELS, unpackParams[4]);
+				gl.glPixelStorei(eGL_UNPACK_SKIP_ROWS, unpackParams[5]);
+				gl.glPixelStorei(eGL_UNPACK_SKIP_IMAGES, unpackParams[6]);
+				gl.glPixelStorei(eGL_UNPACK_ALIGNMENT, unpackParams[7]);
 			}
-			
-			if(textype != eGL_TEXTURE_BUFFER)
-				SetInitialContents(Id, InitialContentData(TextureRes(m_GL->GetCtx(), tex), 0, (byte *)state));
-			else
-				SetInitialContents(Id, InitialContentData(GLResource(MakeNullResource), 0, (byte *)state));
-
-			gl.glBindBuffer(eGL_PIXEL_UNPACK_BUFFER, pub);
-
-			gl.glPixelStorei(eGL_UNPACK_SWAP_BYTES, unpackParams[0]);
-			gl.glPixelStorei(eGL_UNPACK_LSB_FIRST, unpackParams[1]);
-			gl.glPixelStorei(eGL_UNPACK_ROW_LENGTH, unpackParams[2]);
-			gl.glPixelStorei(eGL_UNPACK_IMAGE_HEIGHT, unpackParams[3]);
-			gl.glPixelStorei(eGL_UNPACK_SKIP_PIXELS, unpackParams[4]);
-			gl.glPixelStorei(eGL_UNPACK_SKIP_ROWS, unpackParams[5]);
-			gl.glPixelStorei(eGL_UNPACK_SKIP_IMAGES, unpackParams[6]);
-			gl.glPixelStorei(eGL_UNPACK_ALIGNMENT, unpackParams[7]);
 		}
 	}
 	else if(res.Namespace == eResFramebuffer)
@@ -1191,6 +1421,11 @@ bool GLResourceManager::Serialise_InitialState(GLResource res)
 			SetInitialContents(Id, InitialContentData(GLResource(MakeNullResource), 0, blob));
 		}
 	}
+	else if(res.Namespace == eResRenderbuffer)
+	{
+		RDCWARN("Technically you could try and readback the contents of a RenderBuffer via pixel copy.");
+		RDCWARN("Currently we don't support that though, and initial contents will be uninitialised.");
+	}
 	else
 	{
 		RDCERR("Unexpected type of resource requiring initial state");
@@ -1209,7 +1444,7 @@ void GLResourceManager::Create_InitialState(ResourceId id, GLResource live, bool
 	{
 		GLNOTIMP("Need to set initial default state for vertex array objects without an initial state");
 	}
-	else if(live.Namespace != eResBuffer)
+	else if(live.Namespace != eResBuffer && live.Namespace != eResProgram && live.Namespace != eResRenderbuffer)
 	{
 		RDCUNIMPLEMENTED("Expect all initial states to be created & not skipped, presently");
 	}
@@ -1404,7 +1639,10 @@ void GLResourceManager::Apply_InitialState(GLResource live, InitialContentData i
 
 			gl.glTextureParameterivEXT(live.name, details.curType, eGL_TEXTURE_BASE_LEVEL, (GLint *)&state->baseLevel);
 			gl.glTextureParameterivEXT(live.name, details.curType, eGL_TEXTURE_MAX_LEVEL, (GLint *)&state->maxLevel);
-			gl.glTextureParameterivEXT(live.name, details.curType, eGL_TEXTURE_SWIZZLE_RGBA, (GLint *)state->swizzle);
+
+			// assume that emulated (luminance, alpha-only etc) textures are not swizzled
+			if(!details.emulated)
+				gl.glTextureParameterivEXT(live.name, details.curType, eGL_TEXTURE_SWIZZLE_RGBA, (GLint *)state->swizzle);
 
 			if(!ms)
 			{
@@ -1424,9 +1662,27 @@ void GLResourceManager::Apply_InitialState(GLResource live, InitialContentData i
 		}
 		else
 		{
-			// restore texbuffer only state
-			gl.glTextureBufferRangeEXT(live.name, eGL_TEXTURE_BUFFER, details.internalFormat,
-			                           GetLiveResource(state->texBuffer).name, state->texBufOffs, state->texBufSize);
+			GLuint buffer = GetLiveResource(state->texBuffer).name;
+
+			if(gl.glTextureBufferRangeEXT)
+			{
+				// restore texbuffer only state
+				gl.glTextureBufferRangeEXT(live.name, eGL_TEXTURE_BUFFER, details.internalFormat, buffer, state->texBufOffs, state->texBufSize);
+			}
+			else
+			{
+				uint32_t bufSize = 0;
+				gl.glGetNamedBufferParameterivEXT(buffer, eGL_BUFFER_SIZE, (GLint *)&bufSize);
+				if(state->texBufOffs > 0 || state->texBufSize > bufSize)
+				{
+					const char *msg = "glTextureBufferRangeEXT is not supported on your GL implementation, but is needed for correct replay.\n"
+						"The original capture created a texture buffer with a range - replay will use the whole buffer, which is likely incorrect.";
+					RDCERR("%s", msg);
+					m_GL->AddDebugMessage(eDbgCategory_Resource_Manipulation, eDbgSeverity_High, eDbgSource_IncorrectAPIUse, msg);
+				}
+
+				gl.glTextureBufferEXT(live.name, eGL_TEXTURE_BUFFER, details.internalFormat, buffer);
+			}
 		}
 	}
 	else if(live.Namespace == eResProgram)
@@ -1445,6 +1701,29 @@ void GLResourceManager::Apply_InitialState(GLResource live, InitialContentData i
 
 			gl.glBindFramebuffer(eGL_DRAW_FRAMEBUFFER, live.name);
 			gl.glBindFramebuffer(eGL_READ_FRAMEBUFFER, live.name);
+
+			for(int i=0; i < (int)ARRAY_COUNT(data->Attachments); i++)
+			{
+				FramebufferAttachmentData &a = data->Attachments[i];
+
+				GLuint obj = a.obj == ResourceId() ? 0 : GetLiveResource(a.obj).name;
+
+				if(a.renderbuffer && obj)
+				{
+					gl.glNamedFramebufferRenderbufferEXT(live.name, data->attachmentNames[i], eGL_RENDERBUFFER, obj);
+				}
+				else
+				{
+					if(a.layered && obj)
+					{
+						gl.glNamedFramebufferTextureLayerEXT(live.name, data->attachmentNames[i], obj, a.level, a.layer);
+					}
+					else
+					{
+						gl.glNamedFramebufferTextureEXT(live.name, data->attachmentNames[i], obj, a.level);
+					}
+				}
+			}
 
 			// set invalid caps to GL_COLOR_ATTACHMENT0
 			for(int i=0; i < (int)ARRAY_COUNT(data->DrawBuffers); i++)
@@ -1529,6 +1808,9 @@ void GLResourceManager::Apply_InitialState(GLResource live, InitialContentData i
 
 			gl.glBindVertexArray(VAO);
 		}
+	}
+	else if(live.Namespace == eResRenderbuffer)
+	{
 	}
 	else
 	{

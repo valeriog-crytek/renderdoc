@@ -706,6 +706,7 @@ void WrappedID3D11DeviceContext::VSSetShaderResources(UINT StartSlot, UINT NumVi
 		{
 			ID3D11Resource *res = NULL;
 			ppShaderResourceViews[i]->GetResource(&res);
+			MarkResourceReferenced(GetIDForResource(ppShaderResourceViews[i]), eFrameRef_Read);
 			MarkResourceReferenced(GetIDForResource(res), eFrameRef_Read);
 			SAFE_RELEASE(res);
 		}
@@ -1067,6 +1068,7 @@ void WrappedID3D11DeviceContext::HSSetShaderResources(UINT StartSlot, UINT NumVi
 		{
 			ID3D11Resource *res = NULL;
 			ppShaderResourceViews[i]->GetResource(&res);
+			MarkResourceReferenced(GetIDForResource(ppShaderResourceViews[i]), eFrameRef_Read);
 			MarkResourceReferenced(GetIDForResource(res), eFrameRef_Read);
 			SAFE_RELEASE(res);
 		}
@@ -1427,6 +1429,7 @@ void WrappedID3D11DeviceContext::DSSetShaderResources(UINT StartSlot, UINT NumVi
 		{
 			ID3D11Resource *res = NULL;
 			ppShaderResourceViews[i]->GetResource(&res);
+			MarkResourceReferenced(GetIDForResource(ppShaderResourceViews[i]), eFrameRef_Read);
 			MarkResourceReferenced(GetIDForResource(res), eFrameRef_Read);
 			SAFE_RELEASE(res);
 		}
@@ -1787,6 +1790,7 @@ void WrappedID3D11DeviceContext::GSSetShaderResources(UINT StartSlot, UINT NumVi
 		{
 			ID3D11Resource *res = NULL;
 			ppShaderResourceViews[i]->GetResource(&res);
+			MarkResourceReferenced(GetIDForResource(ppShaderResourceViews[i]), eFrameRef_Read);
 			MarkResourceReferenced(GetIDForResource(res), eFrameRef_Read);
 			SAFE_RELEASE(res);
 		}
@@ -2559,6 +2563,7 @@ void WrappedID3D11DeviceContext::PSSetShaderResources(UINT StartSlot, UINT NumVi
 		{
 			ID3D11Resource *res = NULL;
 			ppShaderResourceViews[i]->GetResource(&res);
+			MarkResourceReferenced(GetIDForResource(ppShaderResourceViews[i]), eFrameRef_Read);
 			MarkResourceReferenced(GetIDForResource(res), eFrameRef_Read);
 			SAFE_RELEASE(res);
 		}
@@ -2740,7 +2745,7 @@ void WrappedID3D11DeviceContext::OMGetRenderTargetsAndUnorderedAccessViews(UINT 
 		return;
 	
 	ID3D11RenderTargetView *rtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {0};
-	ID3D11UnorderedAccessView *uav[D3D11_PS_CS_UAV_REGISTER_COUNT] = {0};
+	ID3D11UnorderedAccessView *uav[D3D11_1_UAV_SLOT_COUNT] = {0};
 	ID3D11DepthStencilView *dsv = NULL;
 	m_pRealContext->OMGetRenderTargetsAndUnorderedAccessViews(NumRTVs, rtv, &dsv, UAVStartSlot, NumUAVs, uav);
 	
@@ -2876,8 +2881,8 @@ bool WrappedID3D11DeviceContext::Serialise_OMSetRenderTargets(UINT NumViews_, ID
 			m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.DepthView, pDepthStencilView);
 		}
 
-		ID3D11UnorderedAccessView *UAVs[D3D11_PS_CS_UAV_REGISTER_COUNT] = {0};
-		m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.UAVs, UAVs, 0, D3D11_PS_CS_UAV_REGISTER_COUNT);
+		ID3D11UnorderedAccessView *UAVs[D3D11_1_UAV_SLOT_COUNT] = {0};
+		m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.UAVs, UAVs, 0, D3D11_1_UAV_SLOT_COUNT);
 	
 		m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.UAVStartSlot, NumViews);
 
@@ -2930,6 +2935,7 @@ void WrappedID3D11DeviceContext::OMSetRenderTargets(UINT NumViews, ID3D11RenderT
 			{
 				ID3D11Resource *res = NULL;
 				ppRenderTargetViews[i]->GetResource(&res);
+				MarkResourceReferenced(GetIDForResource(ppRenderTargetViews[i]), eFrameRef_Read);
 				MarkResourceReferenced(GetIDForResource(res), eFrameRef_Read);
 				SAFE_RELEASE(res);
 			}
@@ -2939,13 +2945,14 @@ void WrappedID3D11DeviceContext::OMSetRenderTargets(UINT NumViews, ID3D11RenderT
 		{
 			ID3D11Resource *res = NULL;
 			pDepthStencilView->GetResource(&res);
+			MarkResourceReferenced(GetIDForResource(pDepthStencilView), eFrameRef_Read);
 			MarkResourceReferenced(GetIDForResource(res), eFrameRef_Read);
 			SAFE_RELEASE(res);
 		}
 	}
 
-	ID3D11UnorderedAccessView *UAVs[D3D11_PS_CS_UAV_REGISTER_COUNT] = {0};
-	m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.UAVs, UAVs, 0, D3D11_PS_CS_UAV_REGISTER_COUNT);
+	ID3D11UnorderedAccessView *UAVs[D3D11_1_UAV_SLOT_COUNT] = {0};
+	m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.UAVs, UAVs, 0, D3D11_1_UAV_SLOT_COUNT);
 	
 	for(UINT i=0; i < NumViews; i++)
 	{
@@ -3006,8 +3013,8 @@ bool WrappedID3D11DeviceContext::Serialise_OMSetRenderTargetsAndUnorderedAccessV
 
 	if(NumUAVs != D3D11_KEEP_UNORDERED_ACCESS_VIEWS)
 	{
-		UnorderedAccessViews = new ID3D11UnorderedAccessView *[D3D11_PS_CS_UAV_REGISTER_COUNT];
-		for(UINT i=0; i < D3D11_PS_CS_UAV_REGISTER_COUNT; i++)
+		UnorderedAccessViews = new ID3D11UnorderedAccessView *[D3D11_1_UAV_SLOT_COUNT];
+		for(UINT i=0; i < D3D11_1_UAV_SLOT_COUNT; i++)
 			UnorderedAccessViews[i] = NULL;
 	}
 
@@ -3050,7 +3057,7 @@ bool WrappedID3D11DeviceContext::Serialise_OMSetRenderTargetsAndUnorderedAccessV
 
 		if(NumUAVs != D3D11_KEEP_UNORDERED_ACCESS_VIEWS)
 		{
-			m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.UAVs, UnorderedAccessViews, 0, D3D11_PS_CS_UAV_REGISTER_COUNT);
+			m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.UAVs, UnorderedAccessViews, 0, D3D11_1_UAV_SLOT_COUNT);
 			m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.UAVStartSlot, UAVStartSlot);
 		}
 
@@ -3104,7 +3111,7 @@ void WrappedID3D11DeviceContext::OMSetRenderTargetsAndUnorderedAccessViews(UINT 
 	}
 
 	ID3D11RenderTargetView *RTs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {0};
-	ID3D11UnorderedAccessView *UAVs[D3D11_PS_CS_UAV_REGISTER_COUNT] = {0};
+	ID3D11UnorderedAccessView *UAVs[D3D11_1_UAV_SLOT_COUNT] = {0};
 	
 	for(UINT i=0; ppRenderTargetViews && i < NumRTVs; i++)
 		RTs[i] = ppRenderTargetViews[i];
@@ -3129,6 +3136,7 @@ void WrappedID3D11DeviceContext::OMSetRenderTargetsAndUnorderedAccessViews(UINT 
 				{
 					ID3D11Resource *res = NULL;
 					ppRenderTargetViews[i]->GetResource(&res);
+					MarkResourceReferenced(GetIDForResource(ppRenderTargetViews[i]), eFrameRef_Read);
 					MarkResourceReferenced(GetIDForResource(res), eFrameRef_Read);
 					SAFE_RELEASE(res);
 				}
@@ -3138,6 +3146,7 @@ void WrappedID3D11DeviceContext::OMSetRenderTargetsAndUnorderedAccessViews(UINT 
 			{
 				ID3D11Resource *res = NULL;
 				pDepthStencilView->GetResource(&res);
+				MarkResourceReferenced(GetIDForResource(pDepthStencilView), eFrameRef_Read);
 				MarkResourceReferenced(GetIDForResource(res), eFrameRef_Read);
 				SAFE_RELEASE(res);
 			}
@@ -3146,12 +3155,12 @@ void WrappedID3D11DeviceContext::OMSetRenderTargetsAndUnorderedAccessViews(UINT 
 
 	if(NumUAVs != D3D11_KEEP_UNORDERED_ACCESS_VIEWS)
 	{
-		m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.UAVs, UAVs, 0, D3D11_PS_CS_UAV_REGISTER_COUNT);
+		m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.UAVs, UAVs, 0, D3D11_1_UAV_SLOT_COUNT);
 		m_CurrentPipelineState->Change(m_CurrentPipelineState->OM.UAVStartSlot, UAVStartSlot);
 	}
 	
 	// invalid case where UAV/RTV overlap, UAV seems to take precedence
-	bool UAVOverlap = (NumUAVs > 0 && NumUAVs <= D3D11_PS_CS_UAV_REGISTER_COUNT &&
+	bool UAVOverlap = (NumUAVs > 0 && NumUAVs <= D3D11_1_UAV_SLOT_COUNT &&
 								     NumRTVs > 0 && NumRTVs <= D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT &&
 										 StartSlot < NumRTVs);
 
@@ -3161,7 +3170,7 @@ void WrappedID3D11DeviceContext::OMSetRenderTargetsAndUnorderedAccessViews(UINT 
 
 		// unset any RTs overlapping with the UAV range
 		m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->OM.RenderTargets, NullRTs, StartSlot,
-						RDCMIN(NumUAVs, D3D11_PS_CS_UAV_REGISTER_COUNT - StartSlot));
+						RDCMIN(NumUAVs, D3D11_1_UAV_SLOT_COUNT - StartSlot));
 	}
 
 	for(UINT i=0; ppRenderTargetViews && i < NumRTVs; i++)
@@ -3789,7 +3798,7 @@ bool WrappedID3D11DeviceContext::Serialise_DrawIndexedInstancedIndirect(ID3D11Bu
 		{
 			ID3D11Buffer *argBuffer = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetLiveResource(BufferForArgs);
 
-			vector<byte> args = m_pDevice->GetDebugManager()->GetBufferData(argBuffer, AlignedByteOffsetForArgs, 5*sizeof(uint32_t));
+			vector<byte> args = m_pDevice->GetDebugManager()->GetBufferData(argBuffer, AlignedByteOffsetForArgs, 5*sizeof(uint32_t), true);
 			uint32_t *uargs = (uint32_t *)&args[0];
 
 			name = "DrawIndexedInstancedIndirect(<" + ToStr::Get(uargs[0])
@@ -3864,7 +3873,7 @@ bool WrappedID3D11DeviceContext::Serialise_DrawInstancedIndirect(ID3D11Buffer *p
 		{
 			ID3D11Buffer *argBuffer = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetLiveResource(BufferForArgs);
 
-			vector<byte> args = m_pDevice->GetDebugManager()->GetBufferData(argBuffer, AlignedByteOffsetForArgs, 4*sizeof(uint32_t));
+			vector<byte> args = m_pDevice->GetDebugManager()->GetBufferData(argBuffer, AlignedByteOffsetForArgs, 4*sizeof(uint32_t), true);
 			uint32_t *uargs = (uint32_t *)&args[0];
 
 			name = "DrawInstancedIndirect(<" + ToStr::Get(uargs[0])
@@ -3957,7 +3966,7 @@ void WrappedID3D11DeviceContext::CSGetUnorderedAccessViews(UINT StartSlot, UINT 
 {
 	if(ppUnorderedAccessViews)
 	{
-		ID3D11UnorderedAccessView *real[D3D11_PS_CS_UAV_REGISTER_COUNT] = {0};
+		ID3D11UnorderedAccessView *real[D3D11_1_UAV_SLOT_COUNT] = {0};
 		m_pRealContext->CSGetUnorderedAccessViews(StartSlot, NumUAVs, real);
 
 		for(UINT i=0; i < NumUAVs; i++)
@@ -3966,7 +3975,7 @@ void WrappedID3D11DeviceContext::CSGetUnorderedAccessViews(UINT StartSlot, UINT 
 			ppUnorderedAccessViews[i] = (ID3D11UnorderedAccessView *)m_pDevice->GetResourceManager()->GetWrapper(real[i]);
 			SAFE_ADDREF(ppUnorderedAccessViews[i]);
 
-			RDCASSERT(ppUnorderedAccessViews[i] == m_CurrentPipelineState->CS.UAVs[i+StartSlot]);
+			RDCASSERT(ppUnorderedAccessViews[i] == m_CurrentPipelineState->CSUAVs[i+StartSlot]);
 		}
 	}
 }
@@ -4185,7 +4194,7 @@ bool WrappedID3D11DeviceContext::Serialise_CSSetUnorderedAccessViews(UINT StartS
 
 	if(m_State <= EXECUTING)
 	{
-		m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->CS.UAVs, UAVs, StartSlot, NumUAVs);
+		m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->CSUAVs, UAVs, StartSlot, NumUAVs);
 
 		for(UINT i=0; i < NumUAVs; i++)
 			UAVs[i] = UNWRAP(WrappedID3D11UnorderedAccessView, UAVs[i]);
@@ -4216,7 +4225,7 @@ void WrappedID3D11DeviceContext::CSSetUnorderedAccessViews(UINT StartSlot, UINT 
 		m_ContextRecord->AddChunk(scope.Get());
 	}
 
-	m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->CS.UAVs, ppUnorderedAccessViews, StartSlot, NumUAVs);
+	m_CurrentPipelineState->ChangeRefWrite(m_CurrentPipelineState->CSUAVs, ppUnorderedAccessViews, StartSlot, NumUAVs);
 	
 	ID3D11UnorderedAccessView *UAVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT];
 	for(UINT i=0; i < NumUAVs; i++)
@@ -4500,6 +4509,20 @@ bool WrappedID3D11DeviceContext::Serialise_Dispatch(UINT ThreadGroupCountX_, UIN
 		draw.name = name;
 		draw.flags |= eDraw_Dispatch;
 
+		draw.dispatchDimension[0] = ThreadGroupCountX;
+		draw.dispatchDimension[1] = ThreadGroupCountY;
+		draw.dispatchDimension[2] = ThreadGroupCountZ;
+
+		if(ThreadGroupCountX == 0)
+			m_pDevice->AddDebugMessage(eDbgCategory_Execution, eDbgSeverity_Medium, eDbgSource_IncorrectAPIUse,
+				"Dispatch call has ThreadGroup count X=0. This will do nothing, which is unusual for a non-indirect Dispatch. Did you mean X=1?");
+		if(ThreadGroupCountY == 0)
+			m_pDevice->AddDebugMessage(eDbgCategory_Execution, eDbgSeverity_Medium, eDbgSource_IncorrectAPIUse,
+				"Dispatch call has ThreadGroup count Y=0. This will do nothing, which is unusual for a non-indirect Dispatch. Did you mean Y=1?");
+		if(ThreadGroupCountZ == 0)
+			m_pDevice->AddDebugMessage(eDbgCategory_Execution, eDbgSeverity_Medium, eDbgSource_IncorrectAPIUse,
+				"Dispatch call has ThreadGroup count Z=0. This will do nothing, which is unusual for a non-indirect Dispatch. Did you mean Z=1?");
+
 		AddDrawcall(draw, true);
 	}
 
@@ -4555,12 +4578,16 @@ bool WrappedID3D11DeviceContext::Serialise_DispatchIndirect(ID3D11Buffer *pBuffe
 		{
 			ID3D11Buffer *argBuffer = (ID3D11Buffer *)m_pDevice->GetResourceManager()->GetLiveResource(BufferForArgs);
 
-			vector<byte> args = m_pDevice->GetDebugManager()->GetBufferData(argBuffer, AlignedByteOffsetForArgs, 5*sizeof(uint32_t));
+			vector<byte> args = m_pDevice->GetDebugManager()->GetBufferData(argBuffer, AlignedByteOffsetForArgs, 5*sizeof(uint32_t), true);
 			uint32_t *uargs = (uint32_t *)&args[0];
 
 			name = "DispatchIndirect(<" + ToStr::Get(uargs[0])
 							+ ", " + ToStr::Get(uargs[1]) + 
 							+ ", " + ToStr::Get(uargs[2]) + ">)";
+
+			draw.dispatchDimension[0] = uargs[0];
+			draw.dispatchDimension[1] = uargs[1];
+			draw.dispatchDimension[2] = uargs[2];
 		}
 
 		draw.name = name;
@@ -5149,6 +5176,8 @@ void WrappedID3D11DeviceContext::UpdateSubresource(ID3D11Resource *pDstResource,
 				Serialise_UpdateSubresource(pDstResource, DstSubresource, pDstBox,
 											pSrcData, SrcRowPitch, SrcDepthPitch);
 
+				scope.SetAlignment(32);
+
 				Chunk *chunk = scope.Get();
 
 				record->AddChunk(chunk);
@@ -5334,10 +5363,7 @@ void WrappedID3D11DeviceContext::CopyStructureCount(ID3D11Buffer *pDstBuffer, UI
 		MarkResourceReferenced(GetIDForResource(pDstBuffer), eFrameRef_Read);
 		MarkResourceReferenced(GetIDForResource(pDstBuffer), eFrameRef_Write);
 
-		ID3D11Resource *res = NULL;
-		pSrcView->GetResource(&res);
-		MarkResourceReferenced(GetIDForResource(res), eFrameRef_Read);
-		SAFE_RELEASE(res);
+		MarkResourceReferenced(GetIDForResource(pSrcView), eFrameRef_Read);
 	}
 	else if(m_State >= WRITING)
 	{
@@ -5346,7 +5372,7 @@ void WrappedID3D11DeviceContext::CopyStructureCount(ID3D11Buffer *pDstBuffer, UI
 		D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForResource(pDstBuffer));
 		RDCASSERT(record);
 
-		D3D11ResourceRecord *srcRecord = ((WrappedID3D11UnorderedAccessView *)pSrcView)->GetResourceRecord();
+		D3D11ResourceRecord *srcRecord = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForResource(pSrcView));
 		RDCASSERT(srcRecord);
 
 		record->AddParent(srcRecord);
@@ -5551,6 +5577,9 @@ void WrappedID3D11DeviceContext::GenerateMips(ID3D11ShaderResourceView *pShaderR
 
 	m_EmptyCommandList = false;
 
+	if(!pShaderResourceView)
+		return;
+
 	if(m_State == WRITING_CAPFRAME)
 	{
 		SCOPED_SERIALISE_CONTEXT(GENERATE_MIPS);
@@ -5563,10 +5592,10 @@ void WrappedID3D11DeviceContext::GenerateMips(ID3D11ShaderResourceView *pShaderR
 		pShaderResourceView->GetResource(&res);
 
 		m_MissingTracks.insert(GetIDForResource(res));
-		m_MissingTracks.insert(GetIDForResource(pShaderResourceView));
 		
 		MarkResourceReferenced(GetIDForResource(res), eFrameRef_Read);
 		MarkResourceReferenced(GetIDForResource(res), eFrameRef_Write);
+		MarkResourceReferenced(GetIDForResource(pShaderResourceView), eFrameRef_Read);
 		SAFE_RELEASE(res);
 	}
 	else if(m_State >= WRITING)
@@ -5679,7 +5708,6 @@ void WrappedID3D11DeviceContext::ClearRenderTargetView(ID3D11RenderTargetView *p
 		pRenderTargetView->GetResource(&res);
 
 		m_MissingTracks.insert(GetIDForResource(res));
-		m_MissingTracks.insert(GetIDForResource(pRenderTargetView));
 
 		SAFE_RELEASE(res);
 
@@ -5731,7 +5759,10 @@ void WrappedID3D11DeviceContext::ClearRenderTargetView(ID3D11RenderTargetView *p
 		pRenderTargetView->GetResource(&res);
 
 		if(m_State == WRITING_CAPFRAME)
+		{
 			MarkResourceReferenced(GetIDForResource(res), eFrameRef_Write);
+			MarkResourceReferenced(GetIDForResource(pRenderTargetView), eFrameRef_Read);
+		}
 		
 		if(m_State == WRITING_IDLE)
 			m_pDevice->GetResourceManager()->MarkCleanResource(GetIDForResource(res));
@@ -5796,7 +5827,6 @@ void WrappedID3D11DeviceContext::ClearUnorderedAccessViewUint(ID3D11UnorderedAcc
 		pUnorderedAccessView->GetResource(&res);
 
 		m_MissingTracks.insert(GetIDForResource(res));
-		m_MissingTracks.insert(GetIDForResource(pUnorderedAccessView));
 
 		SAFE_RELEASE(res);
 
@@ -5808,12 +5838,7 @@ void WrappedID3D11DeviceContext::ClearUnorderedAccessViewUint(ID3D11UnorderedAcc
 		m_pSerialiser->Serialise("context", m_ResourceID);	
 		Serialise_ClearUnorderedAccessViewUint(pUnorderedAccessView, Values);
 
-		ID3D11Resource *viewRes = NULL;
-		pUnorderedAccessView->GetResource(&viewRes);
-		ResourceId id = GetIDForResource(viewRes);
-		SAFE_RELEASE(viewRes);
-
-		D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(id);
+		D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForResource(pUnorderedAccessView));
 		RDCASSERT(record);
 
 		record->LockChunks();
@@ -5848,7 +5873,10 @@ void WrappedID3D11DeviceContext::ClearUnorderedAccessViewUint(ID3D11UnorderedAcc
 		pUnorderedAccessView->GetResource(&res);
 		
 		if(m_State == WRITING_CAPFRAME)
+		{
 			MarkResourceReferenced(GetIDForResource(res), eFrameRef_Write);
+			MarkResourceReferenced(GetIDForResource(pUnorderedAccessView), eFrameRef_Read);
+		}
 		
 		if(m_State == WRITING_IDLE)
 			m_pDevice->GetResourceManager()->MarkCleanResource(GetIDForResource(res));
@@ -5914,7 +5942,6 @@ void WrappedID3D11DeviceContext::ClearUnorderedAccessViewFloat(ID3D11UnorderedAc
 		pUnorderedAccessView->GetResource(&res);
 
 		m_MissingTracks.insert(GetIDForResource(res));
-		m_MissingTracks.insert(GetIDForResource(pUnorderedAccessView));
 
 		SAFE_RELEASE(res);
 
@@ -5926,12 +5953,7 @@ void WrappedID3D11DeviceContext::ClearUnorderedAccessViewFloat(ID3D11UnorderedAc
 		m_pSerialiser->Serialise("context", m_ResourceID);	
 		Serialise_ClearUnorderedAccessViewFloat(pUnorderedAccessView, Values);
 
-		ID3D11Resource *viewRes = NULL;
-		pUnorderedAccessView->GetResource(&viewRes);
-		ResourceId id = GetIDForResource(viewRes);
-		SAFE_RELEASE(viewRes);
-
-		D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(id);
+		D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForResource(pUnorderedAccessView));
 		RDCASSERT(record);
 
 		record->LockChunks();
@@ -5966,7 +5988,10 @@ void WrappedID3D11DeviceContext::ClearUnorderedAccessViewFloat(ID3D11UnorderedAc
 		pUnorderedAccessView->GetResource(&res);
 		
 		if(m_State == WRITING_CAPFRAME)
+		{
 			MarkResourceReferenced(GetIDForResource(res), eFrameRef_Write);
+			MarkResourceReferenced(GetIDForResource(pUnorderedAccessView), eFrameRef_Read);
+		}
 		
 		if(m_State == WRITING_IDLE)
 			m_pDevice->GetResourceManager()->MarkCleanResource(GetIDForResource(res));
@@ -6034,7 +6059,6 @@ void WrappedID3D11DeviceContext::ClearDepthStencilView(ID3D11DepthStencilView *p
 		pDepthStencilView->GetResource(&res);
 
 		m_MissingTracks.insert(GetIDForResource(res));
-		m_MissingTracks.insert(GetIDForResource(pDepthStencilView));
 
 		SAFE_RELEASE(res);
 
@@ -6046,12 +6070,7 @@ void WrappedID3D11DeviceContext::ClearDepthStencilView(ID3D11DepthStencilView *p
 		m_pSerialiser->Serialise("context", m_ResourceID);	
 		Serialise_ClearDepthStencilView(pDepthStencilView, ClearFlags, Depth, Stencil);
 
-		ID3D11Resource *viewRes = NULL;
-		pDepthStencilView->GetResource(&viewRes);
-		ResourceId id = GetIDForResource(viewRes);
-		SAFE_RELEASE(viewRes);
-
-		D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(id);
+		D3D11ResourceRecord *record = m_pDevice->GetResourceManager()->GetResourceRecord(GetIDForResource(pDepthStencilView));
 		RDCASSERT(record);
 
 		record->LockChunks();
@@ -6086,7 +6105,10 @@ void WrappedID3D11DeviceContext::ClearDepthStencilView(ID3D11DepthStencilView *p
 		pDepthStencilView->GetResource(&res);
 		
 		if(m_State == WRITING_CAPFRAME)
+		{
 			MarkResourceReferenced(GetIDForResource(res), eFrameRef_Write);
+			MarkResourceReferenced(GetIDForResource(pDepthStencilView), eFrameRef_Read);
+		}
 
 		if(m_State == WRITING_IDLE)
 			m_pDevice->GetResourceManager()->MarkCleanResource(GetIDForResource(res));
@@ -6927,6 +6949,9 @@ bool WrappedID3D11DeviceContext::Serialise_Unmap(ID3D11Resource *pResource, UINT
 		SERIALISE_ELEMENT(uint32_t, DiffStart, (uint32_t)diffStart);
 		SERIALISE_ELEMENT(uint32_t, DiffEnd, (uint32_t)diffEnd);
 
+		if(m_State >= WRITING || m_pDevice->GetLogVersion() >= 0x000007)
+			m_pSerialiser->AlignNextBuffer(32);
+
 		m_pSerialiser->SerialiseBuffer("MapData", appWritePtr, len);
 
 		if(m_State <= EXECUTING && m_pDevice->GetResourceManager()->HasLiveResource(mapIdx.resource))
@@ -7022,6 +7047,12 @@ bool WrappedID3D11DeviceContext::Serialise_Unmap(ID3D11Resource *pResource, UINT
 			m_pSerialiser->Serialise("DiffStart", diffStart);
 			m_pSerialiser->Serialise("DiffEnd", diffEnd);
 
+			// this is a bit of a hack, but to maintain backwards compatibility we have a
+			// separate function here that aligns the next serialised buffer to a 32-byte
+			// boundary in memory while writing (just skips the padding on read).
+			if(m_State >= WRITING || m_pDevice->GetLogVersion() >= 0x000007)
+				m_pSerialiser->AlignNextBuffer(32);
+
 			byte *buf = (byte *)intercept.app.pData;
 			m_pSerialiser->SerialiseBuffer("MapData", buf, len);
 
@@ -7093,6 +7124,8 @@ void WrappedID3D11DeviceContext::Unmap(ID3D11Resource *pResource, UINT Subresour
 				m_pSerialiser->Serialise("context", m_ResourceID);	
 				Serialise_Unmap(pResource, Subresource);
 
+				scope.SetAlignment(32);
+
 				m_ContextRecord->AddChunk(scope.Get());
 			}
 			else if(m_State >= WRITING)
@@ -7119,6 +7152,8 @@ void WrappedID3D11DeviceContext::Unmap(ID3D11Resource *pResource, UINT Subresour
 					SCOPED_SERIALISE_CONTEXT(UNMAP);
 					m_pSerialiser->Serialise("context", m_ResourceID);	
 					Serialise_Unmap(pResource, Subresource);
+
+					scope.SetAlignment(32);
 
 					Chunk *chunk = scope.Get();
 

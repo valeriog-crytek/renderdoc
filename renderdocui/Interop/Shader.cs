@@ -366,13 +366,50 @@ namespace renderdoc
         public struct DebugFile
         {
             [CustomMarshalAs(CustomUnmanagedType.UTF8TemplatedString)]
-            public string filename;
+            private string filename_;
             [CustomMarshalAs(CustomUnmanagedType.UTF8TemplatedString)]
             public string filetext;
+
+            public string FullFilename
+            {
+                get
+                {
+                    return filename_;
+                }
+            }
+
+            // get filename handling possibly invalid characters
+            public string BaseFilename
+            {
+                get
+                {
+                    try
+                    {
+                        return System.IO.Path.GetFileName(filename_);
+                    }
+                    catch (ArgumentException)
+                    {
+                        // invalid path or similar, just try to go from last \ or / onwards
+
+                        string ret = filename_;
+                        int idx = ret.LastIndexOfAny(new char[] { '/', '\\' });
+                        if (idx > 0)
+                            ret = ret.Substring(idx + 1);
+
+                        return ret;
+                    }
+                }
+                set
+                {
+                    filename_ = value;
+                }
+            }
         };
 
         [CustomMarshalAs(CustomUnmanagedType.TemplatedArray)]
         public DebugFile[] files;
+
+        public Int32 entryFile;
     };
     
     [StructLayout(LayoutKind.Sequential)]
@@ -383,6 +420,9 @@ namespace renderdoc
 
         [CustomMarshalAs(CustomUnmanagedType.UTF8TemplatedString)]
         public string Disassembly;
+
+        [CustomMarshalAs(CustomUnmanagedType.FixedArray, FixedLength = 3)]
+        public UInt32[] DispatchThreadsDimension;
 
         [CustomMarshalAs(CustomUnmanagedType.TemplatedArray)]
         public SigParameter[] InputSig;

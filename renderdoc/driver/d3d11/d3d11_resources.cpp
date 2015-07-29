@@ -62,7 +62,7 @@ map<ResourceId,WrappedID3D11Texture1D::TextureEntry> WrappedTexture<ID3D11Textur
 map<ResourceId,WrappedID3D11Texture2D::TextureEntry> WrappedTexture<ID3D11Texture2D, D3D11_TEXTURE2D_DESC>::m_TextureList;
 map<ResourceId,WrappedID3D11Texture3D::TextureEntry> WrappedTexture<ID3D11Texture3D, D3D11_TEXTURE3D_DESC>::m_TextureList;
 map<ResourceId,WrappedID3D11Buffer::BufferEntry> WrappedID3D11Buffer::m_BufferList;
-map<ResourceId,WrappedShader::ShaderEntry> WrappedShader::m_ShaderList;
+map<ResourceId,WrappedShader::ShaderEntry*> WrappedShader::m_ShaderList;
 
 UINT GetMipForSubresource(ID3D11Resource *res, int Subresource)
 {
@@ -1548,23 +1548,31 @@ HRESULT STDMETHODCALLTYPE RefCounter::QueryInterface(
 unsigned int RefCounter::SoftRef(WrappedID3D11Device *device)
 {
 	unsigned int ret = AddRef();
-	device->SoftRef();
+	if(device)
+		device->SoftRef();
+	else
+		RDCWARN("No device pointer, is a deleted resource being AddRef()d?");
 	return ret;
 }
 
 unsigned int RefCounter::SoftRelease(WrappedID3D11Device *device)
 {
 	unsigned int ret = Release();
-	device->SoftRelease();
+	if(device)
+		device->SoftRelease();
+	else
+		RDCWARN("No device pointer, is a deleted resource being Release()d?");
 	return ret;
 }
 
 void RefCounter::AddDeviceSoftref(WrappedID3D11Device *device)
 {
-	device->SoftRef();
+	if(device)
+		device->SoftRef();
 }
 
 void RefCounter::ReleaseDeviceSoftref(WrappedID3D11Device *device)
 {
-	device->SoftRelease();
+	if(device)
+		device->SoftRelease();
 }

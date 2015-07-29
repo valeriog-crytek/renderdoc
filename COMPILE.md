@@ -1,3 +1,11 @@
+Drivers
+--------------
+
+Each RenderDoc back-end is called a 'driver' and is under the renderdoc/driver/ folder. If you don't have the SDK or don't care about a particular API you can remove a driver from building - in the Makefile by editing LIBS= in renderdoc/Makefile, in VS by removing the project and the reference on the renderdoc reference. Be aware of dependencies, such as D3D11 expecting DXGI to be loaded too.
+
+Some shared code for handling shader formats used in multiple APIs such as DXBC and SPIR-V are in renderdoc/driver/shaders/ folder.
+
+
 Windows
 --------------
 
@@ -26,6 +34,12 @@ Just 'make' in the root should do the trick. This build system is work in progre
 There's no configuration or cmake setup, it assumes gcc/g++ (this can be overwridden via variables CC and CPP, or just in the makefiles).
 
 Requirements are linking against -lX11 and -lGL. For qrenderdoc you need qt5 along with the 'x11extras' package.
+
+This is the apt-get line you'd need to install the requirements on Ubuntu 15.04:
+
+```
+sudo apt-get install libx11-dev mesa-common-dev libgl1-mesa-dev qt5-default libqt5x11extras5-dev
+```
 
 Builds
 --------------

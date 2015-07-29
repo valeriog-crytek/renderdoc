@@ -62,8 +62,13 @@ struct array
 		elems = 0; count = 0;
 	}
 
-	static void deallocate(const void *p) { free((void *)p); }
+#ifdef RENDERDOC_EXPORTS
 	static void *allocate(size_t s) { return malloc(s); }
+	static void deallocate(const void *p) { free((void *)p); }
+#else
+	static void *allocate(size_t s) { return RENDERDOC_AllocArrayMem(s); }
+	static void deallocate(const void *p) { RENDERDOC_FreeArrayMem(p); }
+#endif
 
 	T &operator [](size_t i) { return elems[i]; }
 	const T &operator [](size_t i) const { return elems[i]; }
@@ -119,7 +124,7 @@ struct str : public rdctype::array<char>
 	str &operator =(const char *const in);
 
 	str() : rdctype::array<char>() {}
-	str(const str &o) { elems = 0; count = 0; *this = o; }
+	str(const str &o) : rdctype::array<char>() { *this = o; }
 	str &operator =(const str &o)
 	{
 		// do nothing if we're self-assigning

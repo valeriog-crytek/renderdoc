@@ -201,6 +201,8 @@ void Serialiser::Serialise(const char *name, ShaderReflection &el)
 	Serialise("", el.DebugInfo.entryFunc);
 	Serialise("", el.DebugInfo.files);
 
+	Serialise<3>("", el.DispatchThreadsDimension);
+
 	Serialise("", el.Disassembly);
 	
 	Serialise("", el.InputSig);
@@ -212,7 +214,7 @@ void Serialiser::Serialise(const char *name, ShaderReflection &el)
 
 	Serialise("", el.Interfaces);
 
-	SIZE_CHECK(ShaderReflection, 68);
+	SIZE_CHECK(ShaderReflection, 84);
 }
 
 template<>
@@ -548,7 +550,7 @@ void Serialiser::Serialise(const char *name, GLPipelineState::Rasterizer &el)
 	Serialise("", el.Scissors);
 	Serialise("", el.m_State);
 
-	SIZE_CHECK(GLPipelineState::FrameBuffer, 128);
+	SIZE_CHECK(GLPipelineState::Rasterizer, 104);
 }
 
 template<>
@@ -616,6 +618,16 @@ void Serialiser::Serialise(const char *name, GLPipelineState::FrameBuffer::Blend
 }
 
 template<>
+void Serialiser::Serialise(const char *name, GLPipelineState::FrameBuffer::Attachment &el)
+{
+	Serialise("", el.Obj);
+	Serialise("", el.Layer);
+	Serialise("", el.Mip);
+
+	SIZE_CHECK(GLPipelineState::FrameBuffer::Attachment, 16);
+}
+
+template<>
 void Serialiser::Serialise(const char *name, GLPipelineState::FrameBuffer &el)
 {
 	Serialise("", el.FramebufferSRGB);
@@ -637,7 +649,7 @@ void Serialiser::Serialise(const char *name, GLPipelineState::FrameBuffer &el)
 
 	Serialise("", el.m_Blending);
 
-	SIZE_CHECK(GLPipelineState::FrameBuffer, 128);
+	SIZE_CHECK(GLPipelineState::FrameBuffer, 160);
 }
 
 template<>
@@ -671,7 +683,7 @@ void Serialiser::Serialise(const char *name, GLPipelineState &el)
 
 	Serialise("", el.m_Hints);
 
-	SIZE_CHECK(GLPipelineState, 952);
+	SIZE_CHECK(GLPipelineState, 984);
 }
 
 #pragma endregion OpenGL pipeline state
@@ -764,7 +776,10 @@ void Serialiser::Serialise(const char *name, FetchDrawcall &el)
 	Serialise("", el.indexOffset);
 	Serialise("", el.vertexOffset);
 	Serialise("", el.instanceOffset);
-	
+
+	Serialise<3>("", el.dispatchDimension);
+	Serialise<3>("", el.dispatchThreadsDimension);
+
 	Serialise("", el.indexByteWidth);
 	Serialise("", el.topology);
 
@@ -780,7 +795,7 @@ void Serialiser::Serialise(const char *name, FetchDrawcall &el)
 	Serialise("", el.events);
 	Serialise("", el.children);
 
-	SIZE_CHECK(FetchDrawcall, 168);
+	SIZE_CHECK(FetchDrawcall, 192);
 }
 
 template<>
@@ -1143,7 +1158,7 @@ bool ProxySerialiser::Tick()
 			RenderOverlay(ResourceId(), eTexOverlay_None, 0, 0, vector<uint32_t>());
 			break;
 		case eCommand_PixelHistory:
-			PixelHistory(0, vector<EventUsage>(), ResourceId(), 0, 0, 0);
+			PixelHistory(0, vector<EventUsage>(), ResourceId(), 0, 0, 0, 0, 0);
 			break;
 		case eCommand_DebugVertex:
 			DebugVertex(0, 0, 0, 0, 0, 0, 0);
@@ -1882,7 +1897,7 @@ void ProxySerialiser::RemoveReplacement(ResourceId id)
 	}
 }
 
-vector<PixelModification> ProxySerialiser::PixelHistory(uint32_t frameID, vector<EventUsage> events, ResourceId target, uint32_t x, uint32_t y, uint32_t sampleIdx)
+vector<PixelModification> ProxySerialiser::PixelHistory(uint32_t frameID, vector<EventUsage> events, ResourceId target, uint32_t x, uint32_t y, uint32_t slice, uint32_t mip, uint32_t sampleIdx)
 {
 	vector<PixelModification> ret;
 	
@@ -1891,11 +1906,13 @@ vector<PixelModification> ProxySerialiser::PixelHistory(uint32_t frameID, vector
 	m_ToReplaySerialiser->Serialise("", target);
 	m_ToReplaySerialiser->Serialise("", x);
 	m_ToReplaySerialiser->Serialise("", y);
+	m_ToReplaySerialiser->Serialise("", slice);
+	m_ToReplaySerialiser->Serialise("", mip);
 	m_ToReplaySerialiser->Serialise("", sampleIdx);
 
 	if(m_ReplayHost)
 	{
-		ret = m_Remote->PixelHistory(frameID, events, target, x, y, sampleIdx);
+		ret = m_Remote->PixelHistory(frameID, events, target, x, y, slice, mip, sampleIdx);
 	}
 	else
 	{

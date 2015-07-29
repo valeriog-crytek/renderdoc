@@ -120,8 +120,13 @@ float4 RENDERDOC_TexDisplayPS(v2f IN) : SV_Target0
 
 	col = ((col - RangeMinimum)*InverseRangeSize);
 
-	col = lerp(float4(0,0,0,1), col, Channels);
-	pre_range_col = lerp(float4(0,0,0,1), pre_range_col, Channels);
+	// workaround for D3DCompiler bug. For some reason it assumes texture samples can
+	// never come back as NaN, so involving a cbuffer value like this here ensures
+	// the below isnan()s don't get optimised out.
+	if(Channels.x < 0.5f) col.x = pre_range_col.x = AlwaysZero;
+	if(Channels.y < 0.5f) col.y = pre_range_col.y = AlwaysZero;
+	if(Channels.z < 0.5f) col.z = pre_range_col.z = AlwaysZero;
+	if(Channels.w < 0.5f) col.w = pre_range_col.w = 1.0f-AlwaysZero;
 
 	// show nans, infs and negatives
 	if(OutputDisplayFormat & TEXDISPLAY_NANS)
@@ -187,97 +192,6 @@ struct wireframeV2F
 	float3 norm : Normal;
 	float4 secondary : Secondary;
 };
-
-struct meshA2V
-{
-	float4 pos : pos;
-	float4 secondary : sec;
-};
-
-wireframeV2F RENDERDOC_WireframeHomogVS(meshA2V IN, uint vid : SV_VertexID)
-{
-	wireframeV2F OUT = (wireframeV2F)0;
-	OUT.pos = mul(IN.pos, ModelViewProj);
-	
-	float2 psprite[4] =
-	{
-		float2(-1.0f, -1.0f),
-		float2(-1.0f,  1.0f),
-		float2( 1.0f, -1.0f),
-		float2( 1.0f,  1.0f)
-	};
-
-	OUT.pos.xy += SpriteSize.xy*0.01f*psprite[vid%4]*OUT.pos.w;
-	OUT.secondary = IN.secondary;
-	
-	return OUT;
-}
-
-wireframeV2F RENDERDOC_MeshVS(meshA2V IN, uint vid : SV_VertexID)
-{
-	wireframeV2F OUT = (wireframeV2F)0;
-
-	OUT.pos = mul(float4(IN.pos.xyz, 1), ModelViewProj);
-	OUT.norm = float3(0, 0, 1);
-	OUT.secondary = IN.secondary;
-	
-	return OUT;
-}
-
-[maxvertexcount(3)]
-void RENDERDOC_MeshGS(triangle wireframeV2F input[3], inout TriangleStream<wireframeV2F> TriStream)
-{
-    wireframeV2F output;
-    
-    float4 faceEdgeA = mul(input[1].pos, InvProj) - mul(input[0].pos, InvProj);
-    float4 faceEdgeB = mul(input[2].pos, InvProj) - mul(input[0].pos, InvProj);
-    float3 faceNormal = normalize( cross(faceEdgeA.xyz, faceEdgeB.xyz) );
-	
-    for(int i=0; i<3; i++)
-    {
-        output.pos = input[i].pos;
-        output.norm = faceNormal;
-        output.secondary = input[i].secondary;
-        TriStream.Append(output);
-    }
-    TriStream.RestartStrip();
-}
-
-float4 RENDERDOC_MeshPS(wireframeV2F IN) : SV_Target0
-{
-	uint type = OutputDisplayFormat;
-	
-	if(type == MESHDISPLAY_SECONDARY)
-		return float4(IN.secondary.xyz, 1);
-	else if(type == MESHDISPLAY_SECONDARY_ALPHA)
-		return float4(IN.secondary.www, 1);
-	else if(type == MESHDISPLAY_FACELIT)
-	{
-		float3 lightDir = normalize(float3(0, -0.3f, -1));
-
-		return float4(WireframeColour.xyz*abs(dot(lightDir, IN.norm)), 1);
-	}
-	else //if(type == MESHDISPLAY_SOLID)
-		return float4(WireframeColour.xyz, 1);
-}
-
-wireframeV2F RENDERDOC_WireframeVS(float3 pos : POSITION, uint vid : SV_VertexID)
-{
-	wireframeV2F OUT = (wireframeV2F)0;
-	OUT.pos = mul(float4(pos, 1), ModelViewProj);
-
-	float2 psprite[4] =
-	{
-		float2(-1.0f, -1.0f),
-		float2(-1.0f,  1.0f),
-		float2( 1.0f, -1.0f),
-		float2( 1.0f,  1.0f)
-	};
-
-	OUT.pos.xy += SpriteSize.xy*0.01f*psprite[vid%4]*OUT.pos.w;
-
-	return OUT;
-}
 
 wireframeV2F RENDERDOC_FullscreenVS(uint id : SV_VertexID)
 {
@@ -415,13 +329,12 @@ float4 RENDERDOC_QOResolvePS(float4 vpos : SV_POSITION) : SV_Target0
 
 cbuffer cb0 : register(b0)
 {
-	uint3 src_coord; 
+	uint4 src_coord; // x, y, mip/sample, slice
+
 	bool multisampled;
-	
 	bool is_float;
 	bool is_uint;
 	bool is_int;
-	uint padding;
 };
 
 cbuffer cb1 : register(b1)
@@ -464,9 +377,9 @@ void RENDERDOC_PixelHistoryCopyPixel()
 	{
 		if(copy_depth || copy_stencil)
 		{
-			float2 val = float2(copyin_depth_ms.sample[src_coord.z][uint3(src_coord.xy, 0)].r, -1.0f);
+			float2 val = float2(copyin_depth_ms.sample[src_coord.z][uint3(src_coord.xy, src_coord.w)].r, -1.0f);
 
-			if(copy_stencil) val.g = (float)copyin_stencil_ms.sample[src_coord.z][uint3(src_coord.xy, 0)].g;
+			if(copy_stencil) val.g = (float)copyin_stencil_ms.sample[src_coord.z][uint3(src_coord.xy, src_coord.w)].g;
 
 			copyout_depth[dst_coord.xy].rg = val;
 		}
@@ -474,15 +387,15 @@ void RENDERDOC_PixelHistoryCopyPixel()
 		{
 			if(is_float)
 			{
-				copyout_float[dst_coord.xy] = copyin_float_ms.sample[src_coord.z][uint3(src_coord.xy, 0)];
+				copyout_float[dst_coord.xy] = copyin_float_ms.sample[src_coord.z][uint3(src_coord.xy, src_coord.w)];
 			}
 			else if(is_uint)
 			{
-				copyout_uint[dst_coord.xy] = copyin_uint_ms.sample[src_coord.z][uint3(src_coord.xy, 0)];
+				copyout_uint[dst_coord.xy] = copyin_uint_ms.sample[src_coord.z][uint3(src_coord.xy, src_coord.w)];
 			}
 			else if(is_int)
 			{
-				copyout_int[dst_coord.xy] = copyin_int_ms.sample[src_coord.z][uint3(src_coord.xy, 0)];
+				copyout_int[dst_coord.xy] = copyin_int_ms.sample[src_coord.z][uint3(src_coord.xy, src_coord.w)];
 			}
 		}
 	}
@@ -490,9 +403,9 @@ void RENDERDOC_PixelHistoryCopyPixel()
 	{
 		if(copy_depth || copy_stencil)
 		{
-			float2 val = float2(copyin_depth[uint3(src_coord.xy, 0)].r, -1.0f);
+			float2 val = float2(copyin_depth.mips[src_coord.z][uint3(src_coord.xy, src_coord.w)].r, -1.0f);
 
-			if(copy_stencil) val.g = (float)copyin_stencil[uint3(src_coord.xy, 0)].g;
+			if(copy_stencil) val.g = (float)copyin_stencil.mips[src_coord.z][uint3(src_coord.xy, src_coord.w)].g;
 
 			copyout_depth[dst_coord.xy].rg = val;
 		}
@@ -500,15 +413,15 @@ void RENDERDOC_PixelHistoryCopyPixel()
 		{
 			if(is_float)
 			{
-				copyout_float[dst_coord.xy] = copyin_float[uint3(src_coord.xy, 0)];
+				copyout_float[dst_coord.xy] = copyin_float.mips[src_coord.z][uint3(src_coord.xy, src_coord.w)];
 			}
 			else if(is_uint)
 			{
-				copyout_uint[dst_coord.xy] = copyin_uint[uint3(src_coord.xy, 0)];
+				copyout_uint[dst_coord.xy] = copyin_uint.mips[src_coord.z][uint3(src_coord.xy, src_coord.w)];
 			}
 			else if(is_int)
 			{
-				copyout_int[dst_coord.xy] = copyin_int[uint3(src_coord.xy, 0)];
+				copyout_int[dst_coord.xy] = copyin_int.mips[src_coord.z][uint3(src_coord.xy, src_coord.w)];
 			}
 		}
 	}

@@ -28,6 +28,8 @@
 #include "../gl_driver.h"
 #include "../gl_shader_refl.h"
 
+#include "driver/shaders/spirv/spirv_common.h"
+
 #pragma region Shaders
 
 bool WrappedOpenGL::Serialise_glCreateShader(GLuint shader, GLenum type)
@@ -165,7 +167,13 @@ bool WrappedOpenGL::Serialise_glCompileShader(GLuint shader)
 		{
 			shadDetails.prog = sepProg;
 			MakeShaderReflection(m_Real, shadDetails.type, sepProg, shadDetails.reflection, pointSizeUsed, clipDistanceUsed);
-			
+
+			string s = CompileSPIRV(SPIRVShaderStage(ShaderIdx(shadDetails.type)), shadDetails.sources, shadDetails.spirv);
+			if(!shadDetails.spirv.empty())
+				DisassembleSPIRV(SPIRVShaderStage(ShaderIdx(shadDetails.type)), shadDetails.spirv, s);
+
+			shadDetails.reflection.Disassembly = s;
+
 			create_array_uninit(shadDetails.reflection.DebugInfo.files, shadDetails.sources.size());
 			for(size_t i=0; i < shadDetails.sources.size(); i++)
 			{
@@ -243,6 +251,7 @@ void WrappedOpenGL::glAttachShader(GLuint program, GLuint shader)
 		GLResourceRecord *progRecord = GetResourceManager()->GetResourceRecord(ProgramRes(GetCtx(), program));
 		GLResourceRecord *shadRecord = GetResourceManager()->GetResourceRecord(ShaderRes(GetCtx(), shader));
 		RDCASSERT(progRecord && shadRecord);
+		if(progRecord && shadRecord)
 		{
 			SCOPED_SERIALISE_CONTEXT(ATTACHSHADER);
 			Serialise_glAttachShader(program, shader);
@@ -355,6 +364,12 @@ bool WrappedOpenGL::Serialise_glCreateShaderProgramv(GLuint program, GLenum type
 		shadDetails.sources.swap(src);
 		shadDetails.prog = sepprog;
 		MakeShaderReflection(m_Real, Type, real, shadDetails.reflection, pointSizeUsed, clipDistanceUsed);
+
+		string s = CompileSPIRV(SPIRVShaderStage(ShaderIdx(shadDetails.type)), shadDetails.sources, shadDetails.spirv);
+		if(!shadDetails.spirv.empty())
+			DisassembleSPIRV(SPIRVShaderStage(ShaderIdx(shadDetails.type)), shadDetails.spirv, s);
+
+		shadDetails.reflection.Disassembly = s;
 
 		create_array_uninit(shadDetails.reflection.DebugInfo.files, shadDetails.sources.size());
 		for(size_t i=0; i < shadDetails.sources.size(); i++)
@@ -808,6 +823,7 @@ void WrappedOpenGL::glUseProgram(GLuint program)
 		Serialise_glUseProgram(program);
 
 		m_ContextRecord->AddChunk(scope.Get());
+		GetResourceManager()->MarkResourceFrameReferenced(ProgramRes(GetCtx(), program), eFrameRef_Read);
 	}
 }
 
@@ -847,37 +863,56 @@ bool WrappedOpenGL::Serialise_glUseProgramStages(GLuint pipeline, GLbitfield sta
 {
 	SERIALISE_ELEMENT(ResourceId, pipe, GetResourceManager()->GetID(ProgramPipeRes(GetCtx(), pipeline)));
 	SERIALISE_ELEMENT(uint32_t, Stages, stages);
-	SERIALISE_ELEMENT(ResourceId, prog, GetResourceManager()->GetID(ProgramRes(GetCtx(), program)));
+	SERIALISE_ELEMENT(ResourceId, prog, (program ? GetResourceManager()->GetID(ProgramRes(GetCtx(), program)) : ResourceId()));
 
 	if(m_State < WRITING)
 	{
-		ResourceId livePipeId = GetResourceManager()->GetLiveID(pipe);
-		ResourceId liveProgId = GetResourceManager()->GetLiveID(prog);
-
-		PipelineData &pipeDetails = m_Pipelines[livePipeId];
-		ProgramData &progDetails = m_Programs[liveProgId];
-
-		pipeDetails.programs.push_back(PipelineData::ProgramUse(liveProgId, Stages));
-
-		for(size_t s=0; s < 6; s++)
+		if(prog != ResourceId())
 		{
-			if(Stages & ShaderBit(s))
+			ResourceId livePipeId = GetResourceManager()->GetLiveID(pipe);
+			ResourceId liveProgId = GetResourceManager()->GetLiveID(prog);
+
+			PipelineData &pipeDetails = m_Pipelines[livePipeId];
+			ProgramData &progDetails = m_Programs[liveProgId];
+
+			for(size_t s=0; s < 6; s++)
 			{
-				for(size_t sh=0; sh < progDetails.shaders.size(); sh++)
+				if(Stages & ShaderBit(s))
 				{
-					if(m_Shaders[ progDetails.shaders[sh] ].type == ShaderEnum(s))
+					for(size_t sh=0; sh < progDetails.shaders.size(); sh++)
 					{
-						pipeDetails.stagePrograms[s] = liveProgId;
-						pipeDetails.stageShaders[s] = progDetails.shaders[sh];
-						break;
+						if(m_Shaders[ progDetails.shaders[sh] ].type == ShaderEnum(s))
+						{
+							pipeDetails.stagePrograms[s] = liveProgId;
+							pipeDetails.stageShaders[s] = progDetails.shaders[sh];
+							break;
+						}
 					}
 				}
 			}
+
+			m_Real.glUseProgramStages(GetResourceManager()->GetLiveResource(pipe).name,
+																Stages,
+																GetResourceManager()->GetLiveResource(prog).name);
 		}
-		
-		m_Real.glUseProgramStages(GetResourceManager()->GetLiveResource(pipe).name,
-															Stages,
-															GetResourceManager()->GetLiveResource(prog).name);
+		else
+		{
+			ResourceId livePipeId = GetResourceManager()->GetLiveID(pipe);
+			PipelineData &pipeDetails = m_Pipelines[livePipeId];
+
+			for(size_t s=0; s < 6; s++)
+			{
+				if(Stages & ShaderBit(s))
+				{
+					pipeDetails.stagePrograms[s] = ResourceId();
+					pipeDetails.stageShaders[s] = ResourceId();
+				}
+			}
+
+			m_Real.glUseProgramStages(GetResourceManager()->GetLiveResource(pipe).name,
+																Stages,
+																0);
+		}
 	}
 
 	return true;
@@ -896,8 +931,12 @@ void WrappedOpenGL::glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuin
 		RDCASSERT(record);
 		record->AddChunk(scope.Get());
 
-		GLResourceRecord *progrecord = GetResourceManager()->GetResourceRecord(ProgramRes(GetCtx(), program));
-		record->AddParent(progrecord);
+		if(program)
+		{
+			GLResourceRecord *progrecord = GetResourceManager()->GetResourceRecord(ProgramRes(GetCtx(), program));
+			RDCASSERT(progrecord);
+			record->AddParent(progrecord);
+		}
 	}
 }
 
@@ -1035,6 +1074,7 @@ void WrappedOpenGL::glBindProgramPipeline(GLuint pipeline)
 		Serialise_glBindProgramPipeline(pipeline);
 
 		m_ContextRecord->AddChunk(scope.Get());
+		GetResourceManager()->MarkResourceFrameReferenced(ProgramPipeRes(GetCtx(), pipeline), eFrameRef_Read);
 	}
 }
 
@@ -1139,6 +1179,12 @@ bool WrappedOpenGL::Serialise_glCompileShaderIncludeARB(GLuint shader, GLsizei c
 			shadDetails.prog = sepProg;
 			MakeShaderReflection(m_Real, shadDetails.type, sepProg, shadDetails.reflection, pointSizeUsed, clipDistanceUsed);
 			
+			string s = CompileSPIRV(SPIRVShaderStage(ShaderIdx(shadDetails.type)), shadDetails.sources, shadDetails.spirv);
+			if(!shadDetails.spirv.empty())
+				DisassembleSPIRV(SPIRVShaderStage(ShaderIdx(shadDetails.type)), shadDetails.spirv, s);
+
+			shadDetails.reflection.Disassembly = s;
+
 			create_array_uninit(shadDetails.reflection.DebugInfo.files, shadDetails.sources.size());
 			for(size_t i=0; i < shadDetails.sources.size(); i++)
 			{

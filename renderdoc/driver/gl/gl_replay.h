@@ -160,11 +160,12 @@ class GLReplay : public IReplayDriver
 		
 		void FillCBufferVariables(ResourceId shader, uint32_t cbufSlot, vector<ShaderVariable> &outvars, const vector<byte> &data);
 		
-		vector<PixelModification> PixelHistory(uint32_t frameID, vector<EventUsage> events, ResourceId target, uint32_t x, uint32_t y, uint32_t sampleIdx);
+		vector<PixelModification> PixelHistory(uint32_t frameID, vector<EventUsage> events, ResourceId target, uint32_t x, uint32_t y, uint32_t slice, uint32_t mip, uint32_t sampleIdx);
 		ShaderDebugTrace DebugVertex(uint32_t frameID, uint32_t eventID, uint32_t vertid, uint32_t instid, uint32_t idx, uint32_t instOffset, uint32_t vertOffset);
 		ShaderDebugTrace DebugPixel(uint32_t frameID, uint32_t eventID, uint32_t x, uint32_t y, uint32_t sample, uint32_t primitive);
 		ShaderDebugTrace DebugThread(uint32_t frameID, uint32_t eventID, uint32_t groupid[3], uint32_t threadid[3]);
 		void PickPixel(ResourceId texture, uint32_t x, uint32_t y, uint32_t sliceFace, uint32_t mip, uint32_t sample, float pixel[4]);
+		uint32_t PickVertex(uint32_t frameID, uint32_t eventID, MeshDisplay cfg, uint32_t x, uint32_t y);
 			
 		ResourceId RenderOverlay(ResourceId cfg, TextureDisplayOverlay overlay, uint32_t frameID, uint32_t eventID, const vector<uint32_t> &passEvents);
 		ResourceId ApplyCustomShader(ResourceId shader, ResourceId texid, uint32_t mip);
@@ -176,6 +177,8 @@ class GLReplay : public IReplayDriver
 		void SetProxyBufferData(ResourceId bufid, byte *data, size_t dataSize);
 
 		bool IsRenderOutput(ResourceId id);
+
+		void FileChanged() {}
 		
 		void InitCallstackResolver();
 		bool HasCallstacks();
@@ -230,7 +233,7 @@ class GLReplay : public IReplayDriver
 
 		// any objects that are shared between contexts, we just initialise
 		// once
-		struct
+		struct DebugRenderData
 		{
 			float outWidth, outHeight;
 
@@ -255,6 +258,14 @@ class GLReplay : public IReplayDriver
 			GLuint customFBO;
 			GLuint customTex;
 			ResourceId CustomShaderTexID;
+			
+			static const int maxMeshPicks = 500;
+
+			GLuint meshPickProgram;
+			GLuint pickIBBuf, pickVBBuf;
+			uint32_t pickIBSize, pickVBSize;
+			GLuint pickResultBuf;
+			GLuint pickResultCounterBuf;
 
 			GLuint MS2Array, Array2MS;
 
@@ -302,7 +313,7 @@ class GLReplay : public IReplayDriver
 			GLuint emptyVAO;
 		} DebugData;
 		
-		FloatVector InterpretVertex(byte *data, uint32_t vert, MeshDisplay cfg, byte *end, bool &valid);
+		FloatVector InterpretVertex(byte *data, uint32_t vert, MeshDisplay cfg, byte *end, bool useidx, bool &valid);
 		
 		// simple cache for when we need buffer data for highlighting
 		// vertices, typical use will be lots of vertices in the same

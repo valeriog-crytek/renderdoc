@@ -227,7 +227,7 @@ void RenderDoc::BecomeReplayHost(volatile bool32 &killReplay)
 	}
 }
 
-struct RemoteRenderer
+struct RemoteRenderer : public IRemoteRenderer
 {
 	public:
 		RemoteRenderer(Network::Socket *sock)
@@ -267,7 +267,7 @@ struct RemoteRenderer
 			m_RemoteDrivers.reserve(m.size());
 			for(auto it=m.begin(); it != m.end(); ++it) m_RemoteDrivers.push_back(*it);
 		}
-		~RemoteRenderer()
+		virtual ~RemoteRenderer()
 		{
 			SAFE_DELETE(m_Socket);
 		}

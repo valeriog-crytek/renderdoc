@@ -27,7 +27,7 @@
 
 #include "driver/d3d11/d3d11_device.h"
 #include "driver/d3d11/d3d11_manager.h"
-#include "shaders/dxbc_inspect.h"
+#include "driver/shaders/dxbc/dxbc_inspect.h"
 #include <algorithm>
 
 enum ResourceType
@@ -479,11 +479,13 @@ class WrappedDeviceChild : public RefCounter, public NestedType, public TrackedR
 protected:
 	WrappedID3D11Device* m_pDevice;
 	NestedType* m_pReal;
+	unsigned int m_PipelineRefs;
 
 	WrappedDeviceChild(NestedType* real, WrappedID3D11Device* device)
 		:	RefCounter(real),
 			m_pDevice(device),
-			m_pReal(real)
+			m_pReal(real),
+			m_PipelineRefs(0)
 	{
 		m_pDevice->SoftRef();
 
@@ -515,9 +517,23 @@ public:
 
 	NestedType* GetReal() { return m_pReal; }
 	
-	ULONG STDMETHODCALLTYPE AddRef() { return RefCounter::SoftRef(m_pDevice); }
-	ULONG STDMETHODCALLTYPE Release() { return RefCounter::SoftRelease(m_pDevice); }
+	ULONG STDMETHODCALLTYPE AddRef() { return RefCounter::SoftRef(m_pDevice) - m_PipelineRefs; }
+	ULONG STDMETHODCALLTYPE Release()
+	{
+		unsigned int piperefs = m_PipelineRefs;
+		return RefCounter::SoftRelease(m_pDevice) - piperefs;
+	}
 	
+	void PipelineAddRef()
+	{
+		InterlockedIncrement(&m_PipelineRefs);
+	}
+
+	void PipelineRelease()
+	{
+		InterlockedDecrement(&m_PipelineRefs);
+	}
+
 	HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject)
 	{
 		if(riid == __uuidof(NestedType))
@@ -684,12 +700,13 @@ public:
 	
 	ULONG STDMETHODCALLTYPE AddRef()
 	{
-		return RefCounter::SoftRef(m_pDevice);
+		return RefCounter::SoftRef(m_pDevice) - m_PipelineRefs;
 	}
 
 	ULONG STDMETHODCALLTYPE Release()
 	{
 		unsigned int extRefCount = RefCounter::Release();
+		unsigned int pipeRefs = m_PipelineRefs;
 
 		WrappedID3D11Device *dev = m_pDevice;
 
@@ -698,7 +715,7 @@ public:
 
 		RefCounter::ReleaseDeviceSoftref(dev);
 
-		return extRefCount;
+		return extRefCount - pipeRefs;
 	}
 	
 	HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject)
@@ -759,7 +776,7 @@ public:
 	static map<ResourceId, BufferEntry> m_BufferList;
 	
 	static const int AllocPoolCount = 128*1024;
-	static const int AllocPoolMaxByteSize = 11*1024*1024;
+	static const int AllocPoolMaxByteSize = 13*1024*1024;
 	ALLOCATE_WITH_WRAPPED_POOL(WrappedID3D11Buffer, AllocPoolCount, AllocPoolMaxByteSize);
 
 	WrappedID3D11Buffer(ID3D11Buffer* real, uint32_t byteLength, WrappedID3D11Device* device)
@@ -964,13 +981,11 @@ class WrappedView : public WrappedDeviceChild<NestedType>
 {
 protected:
 	ID3D11Resource *m_pResource;
-	D3D11ResourceRecord *m_pResourceRecord;
 	ResourceId m_ResourceResID;
 
 	WrappedView(NestedType* real, WrappedID3D11Device* device, ID3D11Resource* res)
 		:	WrappedDeviceChild(real, device),
-			m_pResource(res),
-			m_pResourceRecord(NULL)
+			m_pResource(res)
 	{
 		m_ResourceResID = GetIDForResource(m_pResource);
 		// cast is potentially invalid but functions in WrappedResource will be identical across each
@@ -990,9 +1005,6 @@ protected:
 	}
 
 public:
-	D3D11ResourceRecord *GetResourceRecord() { return m_pResourceRecord; }
-	void SetResourceRecord(D3D11ResourceRecord *r) { m_pResourceRecord = r; }
-
 	ResourceId GetResourceResID() { return m_ResourceResID; }
 	
 	HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject)
@@ -1045,7 +1057,7 @@ class WrappedID3D11ShaderResourceView : public WrappedView<ID3D11ShaderResourceV
 {
 public:
 	static const int AllocPoolCount = 65535;
-	static const int AllocPoolMaxByteSize = 5*1024*1024;
+	static const int AllocPoolMaxByteSize = 6*1024*1024;
 	ALLOCATE_WITH_WRAPPED_POOL(WrappedID3D11ShaderResourceView, AllocPoolCount, AllocPoolMaxByteSize);
 
 	WrappedID3D11ShaderResourceView(ID3D11ShaderResourceView* real, ID3D11Resource* res, WrappedID3D11Device* device)
@@ -1076,51 +1088,50 @@ public:
 class WrappedShader
 {
 public:
-	struct ShaderEntry
+	class ShaderEntry
 	{
-		ShaderEntry() : m_DXBCFile(NULL), m_Details(NULL) {}
-		ShaderEntry(const DXBC::DXBCFile &file)
-		{
-			m_DXBCFile = new DXBC::DXBCFile(file);
-			m_Details = MakeShaderReflection(m_DXBCFile);
-		}
-		ShaderEntry(const ShaderEntry &e)
-		{
-			*this = e;
-		}
-		ShaderEntry &operator =(const ShaderEntry &e)
-		{
-			m_DXBCFile = NULL;
-			if(e.m_DXBCFile)
-				m_DXBCFile = new DXBC::DXBCFile(*e.m_DXBCFile);
-			m_Details = MakeShaderReflection(m_DXBCFile);
+		public:
+			ShaderEntry() : m_DXBCFile(NULL), m_Details(NULL) {}
+			ShaderEntry(DXBC::DXBCFile *file)
+			{
+				m_DXBCFile = file;
+				m_Details = MakeShaderReflection(m_DXBCFile);
+			}
+			~ShaderEntry()
+			{
+				SAFE_DELETE(m_DXBCFile);
+				SAFE_DELETE(m_Details);
+			}
 
-			return *this;
-		}
-		~ShaderEntry()
-		{
-			SAFE_DELETE(m_DXBCFile);
-			SAFE_DELETE(m_Details);
-		}
+			DXBC::DXBCFile *GetDXBC() { return m_DXBCFile; }
+			ShaderReflection *GetDetails() { return m_Details; }
+		private:
+			ShaderEntry(const ShaderEntry &e);
+			ShaderEntry &operator =(const ShaderEntry &e);
 
-		DXBC::DXBCFile *m_DXBCFile;
-		ShaderReflection *m_Details;
+			DXBC::DXBCFile *m_DXBCFile;
+			ShaderReflection *m_Details;
 	};
 
-	static map<ResourceId, ShaderEntry> m_ShaderList;
+	static map<ResourceId, ShaderEntry*> m_ShaderList;
 
-	WrappedShader(ResourceId id, const DXBC::DXBCFile &file) : m_ID(id)
+	WrappedShader(ResourceId id, DXBC::DXBCFile *file) : m_ID(id)
 	{
 		RDCASSERT(m_ShaderList.find(m_ID) == m_ShaderList.end());
-		m_ShaderList[m_ID] = ShaderEntry(file);
+		m_ShaderList[m_ID] = new ShaderEntry(file);
 	}
 	virtual ~WrappedShader()
 	{
-		if(m_ShaderList.find(m_ID) != m_ShaderList.end()) m_ShaderList.erase(m_ID);
+		auto it = m_ShaderList.find(m_ID);
+		if(it != m_ShaderList.end())
+		{
+			delete it->second;
+			m_ShaderList.erase(it);
+		}
 	}
 
-	DXBC::DXBCFile *GetDXBC() { return m_ShaderList[m_ID].m_DXBCFile; }
-	ShaderReflection *GetDetails() { return m_ShaderList[m_ID].m_Details; }
+	DXBC::DXBCFile *GetDXBC() { return m_ShaderList[m_ID]->GetDXBC(); }
+	ShaderReflection *GetDetails() { return m_ShaderList[m_ID]->GetDetails(); }
 private:
 	ResourceId m_ID;
 };
@@ -1133,7 +1144,7 @@ public:
 	static const int AllocPoolMaxByteSize = 3*1024*1024;
 	ALLOCATE_WITH_WRAPPED_POOL(WrappedID3D11Shader<RealShaderType>, AllocPoolCount, AllocPoolMaxByteSize);
 
-	WrappedID3D11Shader(RealShaderType* real, const DXBC::DXBCFile &file, WrappedID3D11Device* device)
+	WrappedID3D11Shader(RealShaderType* real, DXBC::DXBCFile *file, WrappedID3D11Device* device)
 		: WrappedDeviceChild<RealShaderType>(real, device), WrappedShader(GetResourceID(), file) {}
 	virtual ~WrappedID3D11Shader() { Shutdown(); }
 };

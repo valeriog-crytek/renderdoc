@@ -126,7 +126,23 @@
 <linkUri>https://github.com/syoyo/tinyexr</linkUri>
 </externalLink>
   </para></listItem>
-  
+
+  <listItem><para>
+  <externalLink>
+<linkText>glslang</linkText>
+<linkAlternateText>Used for compiling GLSL to SPIR-V.</linkAlternateText>
+<linkUri>https://github.com/KhronosGroup/glslang</linkUri>
+</externalLink>
+  </para></listItem>
+
+  <listItem><para>
+  <externalLink>
+<linkText>Qt</linkText>
+<linkAlternateText>Used for QRenderDoc replay UI program</linkAlternateText>
+<linkUri>http://www.qt.io/</linkUri>
+</externalLink>
+  </para></listItem>
+
   <listItem><para>
   <externalLink>
 <linkText>Sandcastle Help File Builder</linkText>
@@ -160,6 +176,8 @@
   <listItem><para>Gareth Thomas</para></listItem>
   <listItem><para>George Ilenei</para></listItem>
   <listItem><para>Matías N. Goldberg</para></listItem>
+  <listItem><para>Louis De Carufel</para></listItem>
+  <listItem><para>Steve Marton</para></listItem>
 </list>
 
       </content>

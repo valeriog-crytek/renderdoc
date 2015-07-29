@@ -35,9 +35,8 @@
 
 #include "d3d11_common.h"
 
-#if defined(INCLUDE_D3D_11_1)
-#include <d3d11_1.h>
-#include <d3d11_2.h>
+#ifndef D3D11_1_UAV_SLOT_COUNT
+#define D3D11_1_UAV_SLOT_COUNT 64
 #endif
 
 #include "d3d11_manager.h"
@@ -66,10 +65,10 @@ struct D3D11InitParams : public RDCInitParams
 	UINT NumFeatureLevels;
 	D3D_FEATURE_LEVEL FeatureLevels[16];
 	
-	static const uint32_t D3D11_SERIALISE_VERSION = 0x0000006;
+	static const uint32_t D3D11_SERIALISE_VERSION = 0x0000008;
 
 	// backwards compatibility for old logs described at the declaration of this array
-	static const uint32_t D3D11_NUM_SUPPORTED_OLD_VERSIONS = 2;
+	static const uint32_t D3D11_NUM_SUPPORTED_OLD_VERSIONS = 4;
 	static const uint32_t D3D11_OLD_VERSIONS[D3D11_NUM_SUPPORTED_OLD_VERSIONS];
 
 	// version number internal to d3d11 stream
@@ -228,6 +227,22 @@ private:
 	bool m_AppControlledCapture;
 	
 	set<ID3D11DeviceChild *> m_CachedStateObjects;
+
+	// This function will check if m_CachedStateObjects is growing too large, and if so
+	// go through m_CachedStateObjects and release any state objects that are purely
+	// cached (refcount == 1). This prevents us from aggressively caching and running
+	// out of state objects (D3D11 has a max of 4096).
+	//
+	// This isn't the ideal solution as it means some Create calls will be slightly
+	// more expensive while they run this garbage collect, but it is the simplest.
+	//
+	// For cases where cached objects are repeatedly created and released this will
+	// rarely kick in - only in the case where a lot of unique state objects are
+	// created then released and never re-used.
+	//
+	// Must be called while m_D3DLock is held.
+	void CachedObjectsGarbageCollect();
+
 	set<WrappedID3D11DeviceContext *> m_DeferredContexts;
 	map<ID3D11InputLayout *, vector<D3D11_INPUT_ELEMENT_DESC> > m_LayoutDescs;
 	map<ID3D11InputLayout *, ShaderReflection *> m_LayoutDXBC;

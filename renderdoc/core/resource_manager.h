@@ -105,6 +105,12 @@ struct ResourceRecord
 			mgr->MarkDirtyResource((*it)->GetResourceID());
 	}
 
+	void MarkParentsReferenced(ResourceRecordHandler *mgr, FrameRefType refType)
+	{
+		for(auto it = Parents.begin(); it != Parents.end(); ++it)
+			mgr->MarkResourceFrameReferenced((*it)->GetResourceID(), refType);
+	}
+
 	void FreeParents(ResourceRecordHandler *mgr)
 	{
 		for(auto it = Parents.begin(); it != Parents.end(); ++it)
@@ -535,6 +541,12 @@ bool ResourceManager<ResourceType, RecordType>::MarkReferenced(map<ResourceId, F
 		if(refType == eFrameRef_Unknown)
 		{
 			// nothing
+		}
+		else if(refType == eFrameRef_ReadBeforeWrite)
+		{
+			// special case, explicitly set to ReadBeforeWrite for when
+			// we know that this use will likely be a partial-write
+			refs[id] = eFrameRef_ReadBeforeWrite;
 		}
 		else if(refs[id] == eFrameRef_Unknown)
 		{

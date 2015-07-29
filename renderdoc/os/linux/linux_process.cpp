@@ -34,120 +34,9 @@
 
 #include "serialise/string_utils.h"
 
-uint32_t Process::InjectIntoProcess(uint32_t pid, const char *logfile, const CaptureOptions *opts, bool waitForExit)
+pid_t RunProcess(const char *app, const char *workingDir, const char *cmdLine, char *const *envp)
 {
-	RDCUNIMPLEMENTED("Injecting into already running processes on linux");
-	return 0;
-}
-
-uint32_t Process::CreateAndInjectIntoProcess(const char *app, const char *workingDir, const char *cmdLine,
-                                             const char *logfile, const CaptureOptions *opts, bool waitForExit)
-{
-	if(app == NULL || app[0] == 0)
-	{
-		RDCERR("Invalid empty 'app'");
-		return 0;
-	}
-
-	char **envp = NULL;
-
-	int nenv = 0;
-	for(; environ[nenv]; nenv++);
-
-	const int numEnvAdd = 4;
-	// LD_LIBRARY_PATH
-	// LD_PRELOAD
-	// RENDERDOC_CAPTUREOPTS
-	// RENDERDOC_LOGFILE
-
-	// might find these already existant in the environment
-	bool libpath = false;
-	bool preload = false;
-
-	nenv += 1+numEnvAdd; // account for terminating NULL we need to replicate, and up to N additional environment varibales
-
-	envp = new char*[nenv];
-
-	string localpath;
-	FileIO::GetExecutableFilename(localpath);
-	localpath = dirname(localpath);
-
-	int i=0; int srci=0;
-	for(; i < nenv; srci++)
-	{
-		if(environ[srci] == NULL)
-		{
-			envp[i] = NULL;
-			break;
-		}
-
-		size_t len = strlen(environ[srci])+1;
-
-		if(!strncmp(environ[srci], "LD_LIBRARY_PATH=", sizeof("LD_LIBRARY_PATH=")-1))
-		{
-			libpath = true;
-			envp[i] = new char[len+localpath.length()+1];
-			memcpy(envp[i], environ[srci], len);
-			strcat(envp[i], ":");
-			strcat(envp[i], localpath.c_str());
-		}
-		else if(!strncmp(environ[srci], "LD_PRELOAD=", sizeof("LD_PRELOAD=")-1))
-		{
-			preload = true;
-			envp[i] = new char[len+sizeof("librenderdoc.so")];
-			memcpy(envp[i], environ[srci], len);
-			strcat(envp[i], ":librenderdoc.so");
-		}
-		else if(!strncmp(environ[srci], "RENDERDOC_", sizeof("RENDERDOC_")-1))
-		{
-			// skip this variable entirely
-			continue;
-		}
-		else
-		{
-			// basic copy
-			envp[i] = new char[len];
-			memcpy(envp[i], environ[srci], len);
-		}
-
-		i++;
-	}
-
-	if(!libpath)
-	{
-		string e = StringFormat::Fmt("LD_LIBRARY_PATH=%s", localpath.c_str());
-		envp[i] = new char[e.length()+1];
-		memcpy(envp[i], e.c_str(), e.length()+1);
-		i++;
-		envp[i] = NULL;
-	}
-
-	if(!preload)
-	{
-		string e = StringFormat::Fmt("LD_PRELOAD=%s/librenderdoc.so", localpath.c_str());
-		envp[i] = new char[e.length()+1];
-		memcpy(envp[i], e.c_str(), e.length()+1);
-		i++;
-		envp[i] = NULL;
-	}
-
-	if(opts)
-	{
-		string e = StringFormat::Fmt("RENDERDOC_CAPTUREOPTS=%s", opts->ToString().c_str());
-		envp[i] = new char[e.length()+1];
-		memcpy(envp[i], e.c_str(), e.length()+1);
-		i++;
-		envp[i] = NULL;
-	}
-
-	if(logfile)
-	{
-		string e = StringFormat::Fmt("RENDERDOC_LOGFILE=%s", logfile);
-		envp[i] = new char[e.length()+1];
-		memcpy(envp[i], e.c_str(), e.length()+1);
-		i++;
-		envp[i] = NULL;
-	}
+	if(!app) return (pid_t)0;
 
 	int argc = 0;
 	char *emptyargv[] = { NULL };
@@ -264,8 +153,6 @@ uint32_t Process::CreateAndInjectIntoProcess(const char *app, const char *workin
 		}
 	}
 
-	int ret = 0;
-
 	pid_t childPid = fork();
 	if(childPid == 0)
 	{
@@ -282,7 +169,165 @@ uint32_t Process::CreateAndInjectIntoProcess(const char *app, const char *workin
 		execve(app, argv, envp);
 		exit(0);
 	}
-	else if(childPid > 0)
+	
+	char **argv_delete = argv;
+
+	if(argv != emptyargv)
+	{
+		while(*argv)
+		{
+			delete[] *argv;
+			argv++;
+		}
+
+		delete[] argv_delete;
+	}
+
+	return childPid;
+}
+
+uint32_t Process::InjectIntoProcess(uint32_t pid, const char *logfile, const CaptureOptions *opts, bool waitForExit)
+{
+	RDCUNIMPLEMENTED("Injecting into already running processes on linux");
+	return 0;
+}
+
+uint32_t Process::LaunchProcess(const char *app, const char *workingDir, const char *cmdLine)
+{
+	if(app == NULL || app[0] == 0)
+	{
+		RDCERR("Invalid empty 'app'");
+		return 0;
+	}
+
+	return (uint32_t)RunProcess(app, workingDir, cmdLine, environ);
+}
+
+uint32_t Process::LaunchAndInjectIntoProcess(const char *app, const char *workingDir, const char *cmdLine,
+                                             const char *logfile, const CaptureOptions *opts, bool waitForExit)
+{
+	if(app == NULL || app[0] == 0)
+	{
+		RDCERR("Invalid empty 'app'");
+		return 0;
+	}
+
+	char **envp = NULL;
+
+	int nenv = 0;
+	for(; environ[nenv]; nenv++);
+
+	const int numEnvAdd = 4;
+	// LD_LIBRARY_PATH
+	// LD_PRELOAD
+	// RENDERDOC_CAPTUREOPTS
+	// RENDERDOC_LOGFILE
+
+	// might find these already existant in the environment
+	bool libpath = false;
+	bool preload = false;
+
+	nenv += 1+numEnvAdd; // account for terminating NULL we need to replicate, and up to N additional environment varibales
+
+	envp = new char*[nenv];
+
+	string localpath;
+	FileIO::GetExecutableFilename(localpath);
+	localpath = dirname(localpath);
+
+	int i=0; int srci=0;
+	for(; i < nenv; srci++)
+	{
+		if(environ[srci] == NULL)
+		{
+			envp[i] = NULL;
+			break;
+		}
+
+		size_t len = strlen(environ[srci])+1;
+
+		if(!strncmp(environ[srci], "LD_LIBRARY_PATH=", sizeof("LD_LIBRARY_PATH=")-1))
+		{
+			libpath = true;
+			envp[i] = new char[len+localpath.length()+1];
+			memcpy(envp[i], environ[srci], len);
+			strcat(envp[i], ":");
+			strcat(envp[i], localpath.c_str());
+		}
+		else if(!strncmp(environ[srci], "LD_PRELOAD=", sizeof("LD_PRELOAD=")-1))
+		{
+			preload = true;
+			envp[i] = new char[len+sizeof("librenderdoc.so")];
+			memcpy(envp[i], environ[srci], len);
+			strcat(envp[i], ":librenderdoc.so");
+		}
+		else if(!strncmp(environ[srci], "RENDERDOC_", sizeof("RENDERDOC_")-1))
+		{
+			// skip this variable entirely
+			continue;
+		}
+		else
+		{
+			// basic copy
+			envp[i] = new char[len];
+			memcpy(envp[i], environ[srci], len);
+		}
+
+		i++;
+	}
+
+	if(!libpath)
+	{
+		string e = StringFormat::Fmt("LD_LIBRARY_PATH=%s", localpath.c_str());
+		envp[i] = new char[e.length()+1];
+		memcpy(envp[i], e.c_str(), e.length()+1);
+		i++;
+		envp[i] = NULL;
+	}
+
+	if(!preload)
+	{
+		string e = StringFormat::Fmt("LD_PRELOAD=%s/librenderdoc.so", localpath.c_str());
+		envp[i] = new char[e.length()+1];
+		memcpy(envp[i], e.c_str(), e.length()+1);
+		i++;
+		envp[i] = NULL;
+	}
+
+	if(opts)
+	{
+		string optstr;
+		{
+			optstr.reserve(sizeof(CaptureOptions)*2+1);
+			byte *b = (byte *)opts;
+			for(size_t i=0; i < sizeof(CaptureOptions); i++)
+			{
+				optstr.push_back(char( 'a' + ((b[i] >> 4)&0xf) ));
+				optstr.push_back(char( 'a' + ((b[i]     )&0xf) ));
+			}
+		}
+
+		string e = StringFormat::Fmt("RENDERDOC_CAPTUREOPTS=%s", optstr.c_str());
+		envp[i] = new char[e.length()+1];
+		memcpy(envp[i], e.c_str(), e.length()+1);
+		i++;
+		envp[i] = NULL;
+	}
+
+	if(logfile)
+	{
+		string e = StringFormat::Fmt("RENDERDOC_LOGFILE=%s", logfile);
+		envp[i] = new char[e.length()+1];
+		memcpy(envp[i], e.c_str(), e.length()+1);
+		i++;
+		envp[i] = NULL;
+	}
+
+	pid_t childPid = RunProcess(app, workingDir, cmdLine, envp);
+
+	int ret = 0;
+
+	if(childPid != (pid_t)0)
 	{
 		// wait for child to have /proc/<pid> and read out tcp socket
 		usleep(1000);
@@ -332,19 +377,7 @@ uint32_t Process::CreateAndInjectIntoProcess(const char *app, const char *workin
 		}
 	}
 
-	char **argv_delete = argv;
 	char **envp_delete = envp;
-
-	if(argv != emptyargv)
-	{
-		while(*argv)
-		{
-			delete[] *argv;
-			argv++;
-		}
-
-		delete[] argv_delete;
-	}
 
 	while(*envp)
 	{

@@ -149,17 +149,19 @@ namespace renderdocui.Windows
             }
         }
 
-        private string FriendlyName(string disasm, string stem, ShaderConstant[] vars)
+        private string FriendlyName(string disasm, string stem, string prefix, ShaderConstant[] vars)
         {
             foreach (var v in vars)
             {
                 if (v.type.descriptor.rows == 0 && v.type.descriptor.cols == 0 && v.type.members.Length > 0)
                 {
-                    disasm = FriendlyName(disasm, stem, v.type.members);
+                    string subPrefix = prefix + v.name + ".";
+
+                    disasm = FriendlyName(disasm, stem, subPrefix, v.type.members);
                 }
                 else if (v.type.descriptor.rows > 0 && v.type.descriptor.cols > 0)
                 {
-                    uint numRegs = v.type.descriptor.rows;
+                    uint numRegs = v.type.descriptor.rows * Math.Max(1, v.type.descriptor.elements);
 
                     for (uint r = 0; r < numRegs; r++)
                     {
@@ -185,6 +187,8 @@ namespace renderdocui.Windows
                             }
 
                             var name = numRegs == 1 ? v.name : string.Format("{0}[{1}]", v.name, r);
+
+                            name = prefix + name;
 
                             var replacement = string.Format(", {0}{1}.{2}{3}",
                                                     match.Groups[1].Value, name, new string(swizzle), match.Groups[3].Value);
@@ -248,7 +252,7 @@ namespace renderdocui.Windows
                 scintilla1.Tag = name;
 
                 scintilla1.PreviewKeyDown += new PreviewKeyDownEventHandler(scintilla1_PreviewKeyDown);
-                scintilla1.KeyDown += new KeyEventHandler(scintilla1_KeyDown);
+                scintilla1.KeyDown += new KeyEventHandler(editScintilla_KeyDown);
 
                 m_Scintillas.Add(scintilla1);
 
@@ -280,11 +284,42 @@ namespace renderdocui.Windows
             this.ResumeLayout(false);
         }
 
-        void scintilla1_KeyDown(object sender, KeyEventArgs e)
+        void editScintilla_KeyDown(object sender, KeyEventArgs e)
         {
             if (e.KeyCode == Keys.S && e.Control)
             {
                 e.SuppressKeyPress = true;
+            }
+            else
+            {
+                readonlyScintilla_KeyDown(sender, e);
+            }
+        }
+
+        void readonlyScintilla_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.F3 && e.Control)
+            {
+                ScintillaNET.Range range = null;
+
+                ScintillaNET.Scintilla sc = sender as ScintillaNET.Scintilla;
+
+                if(sc != null)
+                {
+                    string search = sc.GetWordFromPosition(sc.CurrentPos);
+                    if (sc.Selection.Length > 0)
+                        search = sc.Selection.Text;
+
+                    if (e.Shift)
+                        range = sc.FindReplace.FindPrevious(search, true, ScintillaNET.SearchFlags.MatchCase);
+                    else
+                        range = sc.FindReplace.FindNext(search, true, ScintillaNET.SearchFlags.MatchCase);
+
+                    sc.FindReplace.ClearAllHighlights();
+                    sc.FindReplace.HighlightAll(sc.FindReplace.FindAll(search, ScintillaNET.SearchFlags.MatchCase));
+
+                    sc.Selection.Range = range;
+                }
             }
         }
 
@@ -403,7 +438,7 @@ namespace renderdocui.Windows
                     if (cbuf.variables.Length == 0)
                         continue;
 
-                    disasm = FriendlyName(disasm, stem, cbuf.variables);
+                    disasm = FriendlyName(disasm, stem, "", cbuf.variables);
                 }
 
                 foreach (var r in m_ShaderDetails.Resources)
@@ -441,6 +476,7 @@ namespace renderdocui.Windows
                 m_DisassemblyView.TabIndex = 0;
 
                 m_DisassemblyView.KeyDown += new KeyEventHandler(m_DisassemblyView_KeyDown);
+                m_DisassemblyView.KeyDown += new KeyEventHandler(readonlyScintilla_KeyDown);
 
                 m_DisassemblyView.Markers[CURRENT_MARKER].BackColor = System.Drawing.Color.LightCoral;
                 m_DisassemblyView.Markers[CURRENT_MARKER].Symbol = ScintillaNET.MarkerSymbol.Background;
@@ -489,15 +525,19 @@ namespace renderdocui.Windows
                 else
                     Text = String.Format("{0}()", shader.DebugInfo.entryFunc);
 
+                int fileIdx = 0;
+
                 DockContent sel = null;
                 foreach (var f in shader.DebugInfo.files)
                 {
-                    var name = Path.GetFileName(f.filename);
+                    var name = f.BaseFilename;
 
                     ScintillaNET.Scintilla scintilla1 = MakeEditor("scintilla" + name, f.filetext, true);
                     scintilla1.IsReadOnly = true;
 
                     scintilla1.Tag = name;
+
+                    scintilla1.KeyDown += new KeyEventHandler(readonlyScintilla_KeyDown);
 
                     var w = Helpers.WrapDockContent(dockPanel, scintilla1, name);
                     w.CloseButton = false;
@@ -506,8 +546,17 @@ namespace renderdocui.Windows
 
                     m_Scintillas.Add(scintilla1);
 
-                    if (f.filetext.Contains(shader.DebugInfo.entryFunc))
+                    if (shader.DebugInfo.entryFile >= 0 && shader.DebugInfo.entryFile < shader.DebugInfo.files.Length)
+                    {
+                        if (fileIdx == shader.DebugInfo.entryFile)
+                            sel = w;
+                    }
+                    else if (f.filetext.Contains(shader.DebugInfo.entryFunc))
+                    {
                         sel = w;
+                    }
+
+                    fileIdx++;
                 }
 
                 if (trace != null || sel == null)
@@ -641,7 +690,14 @@ namespace renderdocui.Windows
                 {
                     using (StreamReader reader = new StreamReader(stream))
                     {
-                        File.WriteAllText(syntaxpath, reader.ReadToEnd());
+                        try
+                        {
+                            File.WriteAllText(syntaxpath, reader.ReadToEnd());
+                        }
+                        catch (System.Exception)
+                        {
+                            // silently fail if we can't write to the path - syntax highlighting will just be broken
+                        }
                     }
                 }
             }
@@ -674,7 +730,7 @@ namespace renderdocui.Windows
 
             string word = scintilla1.GetWordFromPosition(scintilla1.CurrentPos);
 
-            var match = Regex.Match(word, "^[rvog][0-9]+$");
+            var match = Regex.Match(word, "^[rvogst][0-9]+$");
 
             foreach (ScintillaNET.Range r in m_PrevRanges)
             {
@@ -683,16 +739,111 @@ namespace renderdocui.Windows
 
             m_PrevRanges.Clear();
 
+            bool highlighted = false;
+
             if (match.Success)
             {
+                if (word[0] == 'r' || word[0] == 'o' || word[0] == 'g')
+                {
+                    variableRegs.BeginUpdate();
+                    foreach (var n in variableRegs.Nodes)
+                    {
+                        if (Regex.Match(n[0].ToString(), @"\b" + word + @"\b").Success)
+                            n.BackColor = Color.LightGreen;
+                        else
+                            n.BackColor = Color.Transparent;
+                    }
+                    variableRegs.EndUpdate();
+
+                    constantRegs.BeginUpdate();
+                    foreach (var n in constantRegs.Nodes)
+                        n.BackColor = Color.Transparent;
+                    constantRegs.EndUpdate();
+
+                    highlighted = true;
+                }
+                else if (word[0] == 'v')
+                {
+                    constantRegs.BeginUpdate();
+                    foreach (var n in constantRegs.Nodes)
+                    {
+                        if (Regex.Match(n[0].ToString(), @"\b" + word + @"\b").Success)
+                            n.BackColor = Color.LightGreen;
+                        else
+                            n.BackColor = Color.Transparent;
+                    }
+                    constantRegs.EndUpdate();
+
+                    variableRegs.BeginUpdate();
+                    foreach (var n in variableRegs.Nodes)
+                        n.BackColor = Color.Transparent;
+                    variableRegs.EndUpdate();
+
+                    highlighted = true;
+                }
+
                 var matches = Regex.Matches(scintilla1.Text, word + "\\.[xyzwrgba]+");
 
-                foreach(Match m in matches)
+                foreach (Match m in matches)
                 {
                     var r = scintilla1.GetRange(m.Index, m.Index + m.Length);
                     m_PrevRanges.Add(r);
                     r.SetIndicator(4);
                 }
+            }
+            else if(m_Trace != null)
+            {
+                foreach (var cb in m_Trace.cbuffers)
+                {
+                    foreach (var c in cb.variables)
+                    {
+                        if ((c.rows > 0 || c.columns > 0) && Regex.Match(c.name.ToString(), @"\b" + word + @"\b").Success)
+                        {
+                            constantRegs.BeginUpdate();
+                            foreach (var n in constantRegs.Nodes)
+                            {
+                                if(n.Tag == c)
+                                    n.BackColor = Color.LightGreen;
+                                else
+                                    n.BackColor = Color.Transparent;
+                            }
+                            constantRegs.EndUpdate();
+
+                            variableRegs.BeginUpdate();
+                            foreach (var n in variableRegs.Nodes)
+                                n.BackColor = Color.Transparent;
+                            variableRegs.EndUpdate();
+
+                            var matches = Regex.Matches(scintilla1.Text, @"\b" + word + @"\b");
+
+                            foreach (Match m in matches)
+                            {
+                                var r = scintilla1.GetRange(m.Index, m.Index + m.Length);
+                                m_PrevRanges.Add(r);
+                                r.SetIndicator(4);
+                            }
+
+                            highlighted = true;
+                            break;
+                        }
+                    }
+
+                    if(highlighted)
+                        break;
+                }
+            }
+
+            if (!highlighted)
+            {
+                constantRegs.BeginUpdate();
+                foreach (var n in constantRegs.Nodes)
+                    n.BackColor = Color.Transparent;
+                constantRegs.EndUpdate();
+
+                variableRegs.BeginUpdate();
+                foreach (var n in variableRegs.Nodes)
+                    n.BackColor = Color.Transparent;
+                variableRegs.EndUpdate();
             }
         }
 
@@ -774,9 +925,9 @@ namespace renderdocui.Windows
 
             ListView list = sender as ListView;
 
-            if (m_HoverItem != null)
+            if (m_HoverItem != null && m_HoverItem.ListView != null)
                 variableHover.Hide(m_HoverItem.ListView);
-            if (m_HoverNode != null)
+            if (m_HoverNode != null && m_HoverNode.OwnerView != null)
                 variableHover.Hide(m_HoverNode.OwnerView);
 
             hoverTimer.Enabled = false;
@@ -822,6 +973,9 @@ namespace renderdocui.Windows
             Point hoverPoint = Point.Empty;
             IWin32Window hoverWin = null;
 
+            var item = m_HoverItem;
+            var node = m_HoverNode;
+
             if (m_HoverScintilla != null && m_HoverReg.Length > 0)
             {
                 var pt = m_HoverScintilla.PointToClient(Cursor.Position);
@@ -859,30 +1013,30 @@ namespace renderdocui.Windows
                     }
                 }
             }
-            else if(m_HoverItem != null)
+            else if (item != null && item.ListView != null)
             {
-                var pt = m_HoverItem.ListView.PointToClient(Cursor.Position);
+                var pt = item.ListView.PointToClient(Cursor.Position);
 
-                if (m_HoverItem.ListView.ClientRectangle.Contains(pt))
+                if (item.ListView.ClientRectangle.Contains(pt))
                 {
-                    hoverPoint = new Point(m_HoverItem.ListView.ClientRectangle.Left + pt.X + 10, m_HoverItem.ListView.ClientRectangle.Top + pt.Y + 10);
-                    hoverVar = m_HoverItem.Tag as ShaderVariable;
-                    hoverWin = m_HoverItem.ListView;
+                    hoverPoint = new Point(item.ListView.ClientRectangle.Left + pt.X + 10, item.ListView.ClientRectangle.Top + pt.Y + 10);
+                    hoverVar = item.Tag as ShaderVariable;
+                    hoverWin = item.ListView;
                 }
             }
-            else if (m_HoverNode != null)
+            else if (node != null && node.OwnerView != null)
             {
-                var pt = m_HoverNode.OwnerView.PointToClient(Cursor.Position);
+                var pt = node.OwnerView.PointToClient(Cursor.Position);
 
-                if (m_HoverNode.OwnerView.ClientRectangle.Contains(pt))
+                if (node.OwnerView.ClientRectangle.Contains(pt))
                 {
-                    hoverPoint = new Point(m_HoverNode.OwnerView.ClientRectangle.Left + pt.X + 10, m_HoverNode.OwnerView.ClientRectangle.Top + pt.Y + 10);
-                    hoverVar = m_HoverNode.Tag as ShaderVariable;
-                    hoverWin = m_HoverNode.OwnerView;
+                    hoverPoint = new Point(node.OwnerView.ClientRectangle.Left + pt.X + 10, node.OwnerView.ClientRectangle.Top + pt.Y + 10);
+                    hoverVar = node.Tag as ShaderVariable;
+                    hoverWin = node.OwnerView;
                 }
             }
 
-            if(hoverVar != null)
+            if(hoverVar != null && hoverWin != null)
             {
                 var fmt =
                     @"{0}" + Environment.NewLine +
@@ -990,6 +1144,8 @@ namespace renderdocui.Windows
             }
 
             m_DisassemblyView.Invalidate();
+
+            hoverTimer_Tick(hoverTimer, new EventArgs());
 
             if (constantRegs.Nodes.IsEmpty())
             {
@@ -1319,6 +1475,14 @@ namespace renderdocui.Windows
             if (m_Trace == null || m_Trace.states == null)
                 return;
 
+            DebugKeys_KeyDown(sender, e);
+        }
+
+        void DebugKeys_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (m_Trace == null || m_Trace.states == null)
+                return;
+
             if (e.KeyCode == Keys.F10)
             {
                 if (e.Control)
@@ -1333,6 +1497,11 @@ namespace renderdocui.Windows
                 {
                     StepNext();
                 }
+                e.Handled = true;
+            }
+            if (e.KeyCode == Keys.F5 && !e.Control && e.Shift && !e.Alt)
+            {
+                RunBack();
                 e.Handled = true;
             }
             if (e.KeyCode == Keys.F5 && !e.Control && !e.Shift && !e.Alt)
@@ -1581,7 +1750,7 @@ namespace renderdocui.Windows
         {
             if (m_SaveCallback != null)
             {
-                var files = new Dictionary<string, string>();
+                var files = new Dictionary<string, string>(StringComparer.InvariantCultureIgnoreCase);
                 foreach (var s in m_Scintillas)
                     files.Add(s.Tag as string, s.Text);
                 m_SaveCallback(this, files);

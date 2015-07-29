@@ -26,7 +26,7 @@
 #include "d3d11_manager.h"
 #include "d3d11_context.h"
 #include "d3d11_debug.h"
-#include "shaders/dxbc_debug.h"
+#include "driver/shaders/dxbc/dxbc_debug.h"
 #include "maths/matrix.h"
 #include "maths/camera.h"
 #include "data/resource.h"
@@ -771,6 +771,8 @@ bool D3D11DebugManager::InitDebugRendering()
 	displayhlsl += GetEmbeddedResource(debugcommon_hlsl);
 	displayhlsl += GetEmbeddedResource(debugdisplay_hlsl);
 
+	string meshhlsl = GetEmbeddedResource(debugcbuffers_h) + GetEmbeddedResource(mesh_hlsl);
+
 	m_DebugRender.FullscreenVS = MakeVShader(displayhlsl.c_str(), "RENDERDOC_FullscreenVS", "vs_4_0");
 
 	if(RenderDoc::Inst().IsReplayApp())
@@ -789,10 +791,10 @@ bool D3D11DebugManager::InitDebugRendering()
 
 		m_DebugRender.GenericVS = MakeVShader(displayhlsl.c_str(), "RENDERDOC_DebugVS", "vs_4_0");
 		m_DebugRender.TexDisplayPS = MakePShader(displayhlsl.c_str(), "RENDERDOC_TexDisplayPS", "ps_5_0");
-		m_DebugRender.WireframeVS = MakeVShader(displayhlsl.c_str(), "RENDERDOC_WireframeVS", "vs_4_0", 1, &inputDesc, &m_DebugRender.GenericLayout);
-		m_DebugRender.MeshVS = MakeVShader(displayhlsl.c_str(), "RENDERDOC_MeshVS", "vs_4_0", 0, NULL, NULL, &bytecode);
-		m_DebugRender.MeshGS = MakeGShader(displayhlsl.c_str(), "RENDERDOC_MeshGS", "gs_4_0");
-		m_DebugRender.MeshPS = MakePShader(displayhlsl.c_str(), "RENDERDOC_MeshPS", "ps_4_0");
+		m_DebugRender.WireframeVS = MakeVShader(meshhlsl.c_str(), "RENDERDOC_WireframeVS", "vs_4_0", 1, &inputDesc, &m_DebugRender.GenericLayout);
+		m_DebugRender.MeshVS = MakeVShader(meshhlsl.c_str(), "RENDERDOC_MeshVS", "vs_4_0", 0, NULL, NULL, &bytecode);
+		m_DebugRender.MeshGS = MakeGShader(meshhlsl.c_str(), "RENDERDOC_MeshGS", "gs_4_0");
+		m_DebugRender.MeshPS = MakePShader(meshhlsl.c_str(), "RENDERDOC_MeshPS", "ps_4_0");
 
 		m_DebugRender.MeshVSBytecode = new byte[bytecode.size()];
 		m_DebugRender.MeshVSBytelen = (uint32_t)bytecode.size();
@@ -816,7 +818,7 @@ bool D3D11DebugManager::InitDebugRendering()
 		inputDescHomog[1].AlignedByteOffset = 0;
 		inputDescHomog[1].InstanceDataStepRate = 0;
 
-		m_DebugRender.WireframeHomogVS = MakeVShader(displayhlsl.c_str(), "RENDERDOC_WireframeHomogVS", "vs_4_0", 2, inputDescHomog, &m_DebugRender.GenericHomogLayout, &bytecode);
+		m_DebugRender.WireframeHomogVS = MakeVShader(meshhlsl.c_str(), "RENDERDOC_WireframeHomogVS", "vs_4_0", 2, inputDescHomog, &m_DebugRender.GenericHomogLayout, &bytecode);
 
 		m_DebugRender.MeshHomogVSBytecode = new byte[bytecode.size()];
 		m_DebugRender.MeshHomogVSBytelen = (uint32_t)bytecode.size();
@@ -832,6 +834,8 @@ bool D3D11DebugManager::InitDebugRendering()
 		m_DebugRender.PixelHistoryUnusedCS = MakeCShader(displayhlsl.c_str(), "RENDERDOC_PixelHistoryUnused", "cs_5_0");
 		m_DebugRender.PixelHistoryCopyCS = MakeCShader(displayhlsl.c_str(), "RENDERDOC_PixelHistoryCopyPixel", "cs_5_0");
 		m_DebugRender.PrimitiveIDPS = MakePShader(displayhlsl.c_str(), "RENDERDOC_PrimitiveIDPS", "ps_5_0");
+
+		m_DebugRender.MeshPickCS = MakeCShader(meshhlsl.c_str(), "RENDERDOC_MeshPickCS", "cs_5_0");
 
 		string histogramhlsl = GetEmbeddedResource(debugcbuffers_h);
 		histogramhlsl += GetEmbeddedResource(debugcommon_hlsl);
@@ -1215,6 +1219,34 @@ bool D3D11DebugManager::InitDebugRendering()
 
 		if(FAILED(hr))
 			RDCERR("Failed to create result stage buff %08x", hr);
+
+		bDesc.ByteWidth = sizeof(Vec4f)*DebugRenderData::maxMeshPicks;
+		bDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+		bDesc.CPUAccessFlags = 0;
+		bDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+		bDesc.StructureByteStride = sizeof(Vec4f);
+		bDesc.Usage = D3D11_USAGE_DEFAULT;
+
+		hr = m_pDevice->CreateBuffer(&bDesc, NULL, &m_DebugRender.PickResultBuf);
+
+		if(FAILED(hr))
+			RDCERR("Failed to create mesh pick result buff %08x", hr);
+
+		uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+		uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+		uavDesc.Buffer.FirstElement = 0;
+		uavDesc.Buffer.NumElements = DebugRenderData::maxMeshPicks;
+		uavDesc.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_APPEND;
+
+		hr = m_pDevice->CreateUnorderedAccessView(m_DebugRender.PickResultBuf, &uavDesc, &m_DebugRender.PickResultUAV);
+
+		if(FAILED(hr))
+			RDCERR("Failed to create mesh pick result UAV %08x", hr);
+
+		// created/sized on demand
+		m_DebugRender.PickIBBuf = m_DebugRender.PickVBBuf = NULL;
+		m_DebugRender.PickIBSRV = m_DebugRender.PickVBSRV = NULL;
+		m_DebugRender.PickIBSize = m_DebugRender.PickVBSize = 0;
 	}
 	
 	if(RenderDoc::Inst().IsReplayApp())
@@ -1301,7 +1333,7 @@ bool D3D11DebugManager::InitStreamOut()
 		desc.DepthBiasClamp = 0.0f;
 		desc.DepthClipEnable = FALSE;
 		desc.FrontCounterClockwise = FALSE;
-		desc.MultisampleEnable = FALSE;
+		desc.MultisampleEnable = TRUE;
 		desc.ScissorEnable = FALSE;
 		desc.SlopeScaledDepthBias = 0.0f;
 		desc.FillMode = D3D11_FILL_WIREFRAME;
@@ -1425,7 +1457,7 @@ bool D3D11DebugManager::InitStreamOut()
 		D3D11_BUFFER_DESC bdesc;
 		bdesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
 		bdesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-		bdesc.ByteWidth = sizeof(Vec4f)*16;
+		bdesc.ByteWidth = sizeof(Vec4f)*24;
 		bdesc.MiscFlags = 0;
 		bdesc.Usage = D3D11_USAGE_DYNAMIC;
 
@@ -1721,7 +1753,7 @@ uint64_t D3D11DebugManager::MakeOutputWindow(void *w, bool depth)
 	outw.width = swapDesc.BufferDesc.Width = rect.right-rect.left;
 	outw.height = swapDesc.BufferDesc.Height = rect.bottom-rect.top;
 	swapDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-	swapDesc.SampleDesc.Count = 1;
+	swapDesc.SampleDesc.Count = depth ? 4 : 1;
 	swapDesc.SampleDesc.Quality = 0;
 	swapDesc.OutputWindow = outw.wnd;
 	swapDesc.Windowed = TRUE;
@@ -1940,10 +1972,13 @@ bool D3D11DebugManager::GetHistogram(ResourceId texid, uint32_t sliceFace, uint3
 
 	m_pImmediateContext->OMSetRenderTargetsAndUnorderedAccessViews(0, NULL, NULL, 0, 0, NULL, NULL);
 	
-	ID3D11UnorderedAccessView *uavs[D3D11_PS_CS_UAV_REGISTER_COUNT] = { 0 };
-	UINT UAV_keepcounts[D3D11_PS_CS_UAV_REGISTER_COUNT] = { (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1 };
+	ID3D11UnorderedAccessView *uavs[D3D11_1_UAV_SLOT_COUNT] = { 0 };
+	UINT UAV_keepcounts[D3D11_1_UAV_SLOT_COUNT];
+	memset(&UAV_keepcounts[0], 0xff, sizeof(UAV_keepcounts));
+
+	const UINT numUAVs = m_WrappedContext->IsFL11_1() ? D3D11_1_UAV_SLOT_COUNT : D3D11_PS_CS_UAV_REGISTER_COUNT;
 	uavs[0] = m_DebugRender.histogramUAV;
-	m_pImmediateContext->CSSetUnorderedAccessViews(0, D3D11_PS_CS_UAV_REGISTER_COUNT, uavs, UAV_keepcounts);
+	m_pImmediateContext->CSSetUnorderedAccessViews(0, numUAVs, uavs, UAV_keepcounts);
 
 	m_pImmediateContext->CSSetConstantBuffers(0, 1, &cbuf);
 
@@ -2031,9 +2066,10 @@ bool D3D11DebugManager::GetMinMax(ResourceId texid, uint32_t sliceFace, uint32_t
 	
 	m_pImmediateContext->CSSetConstantBuffers(0, 1, &cbuf);
 	
-	ID3D11UnorderedAccessView *uavs[D3D11_PS_CS_UAV_REGISTER_COUNT] = { NULL };
+	ID3D11UnorderedAccessView *uavs[D3D11_1_UAV_SLOT_COUNT] = { NULL };
+	const UINT numUAVs = m_WrappedContext->IsFL11_1() ? D3D11_1_UAV_SLOT_COUNT : D3D11_PS_CS_UAV_REGISTER_COUNT;
 	uavs[intIdx] = m_DebugRender.tileResultUAV[intIdx];
-	m_pImmediateContext->CSSetUnorderedAccessViews(0, D3D11_PS_CS_UAV_REGISTER_COUNT, uavs, NULL);
+	m_pImmediateContext->CSSetUnorderedAccessViews(0, numUAVs, uavs, NULL);
 	
 	m_pImmediateContext->CSSetShaderResources(srvOffset, eTexType_Max, details.srv);
 
@@ -2095,10 +2131,10 @@ vector<byte> D3D11DebugManager::GetBufferData(ResourceId buff, uint32_t offset, 
 
 	RDCASSERT(buffer);
 
-	return GetBufferData(buffer, offset, len);
+	return GetBufferData(buffer, offset, len, true);
 }
 
-vector<byte> D3D11DebugManager::GetBufferData(ID3D11Buffer *buffer, uint32_t offset, uint32_t len)
+vector<byte> D3D11DebugManager::GetBufferData(ID3D11Buffer *buffer, uint32_t offset, uint32_t len, bool unwrap)
 {
 	D3D11_MAPPED_SUBRESOURCE mapped;
 
@@ -2131,7 +2167,7 @@ vector<byte> D3D11DebugManager::GetBufferData(ID3D11Buffer *buffer, uint32_t off
 	box.front = 0;
 	box.back = 1;
 
-	ID3D11Buffer *src = UNWRAP(WrappedID3D11Buffer, buffer);
+	ID3D11Buffer *src = unwrap ? UNWRAP(WrappedID3D11Buffer, buffer) : buffer;
 
 	while(len > 0)
 	{
@@ -2221,10 +2257,12 @@ void D3D11DebugManager::CopyArrayToTex2DMS(ID3D11Texture2D *destMS, ID3D11Textur
 	
 	m_pImmediateContext->CopyResource(srvResource, srcArray);
 
-	ID3D11UnorderedAccessView *uavs[D3D11_PS_CS_UAV_REGISTER_COUNT] = { NULL };
-	UINT uavCounts[D3D11_PS_CS_UAV_REGISTER_COUNT] = { (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1 };
+	ID3D11UnorderedAccessView *uavs[D3D11_1_UAV_SLOT_COUNT] = { NULL };
+	const UINT numUAVs = m_WrappedContext->IsFL11_1() ? D3D11_1_UAV_SLOT_COUNT : D3D11_PS_CS_UAV_REGISTER_COUNT;
+	UINT uavCounts[D3D11_1_UAV_SLOT_COUNT];
+	memset(&uavCounts[0], 0xff, sizeof(uavCounts));
 
-	m_pImmediateContext->CSSetUnorderedAccessViews(0, D3D11_PS_CS_UAV_REGISTER_COUNT, uavs, uavCounts);
+	m_pImmediateContext->CSSetUnorderedAccessViews(0, numUAVs, uavs, uavCounts);
 	
 	m_pImmediateContext->VSSetShader(m_DebugRender.FullscreenVS, NULL, 0);
 	m_pImmediateContext->PSSetShader(depth ? m_DebugRender.DepthCopyArrayToMSPS : m_DebugRender.CopyArrayToMSPS, NULL, 0);
@@ -2342,7 +2380,7 @@ void D3D11DebugManager::CopyArrayToTex2DMS(ID3D11Texture2D *destMS, ID3D11Textur
 	ID3D11ShaderResourceView *srvs[8] = { NULL };
 	srvs[0] = srvArray;
 
-	m_pImmediateContext->PSSetShaderResources(0, D3D11_PS_CS_UAV_REGISTER_COUNT, srvs);
+	m_pImmediateContext->PSSetShaderResources(0, 8, srvs);
 	
 	// loop over every array slice in MS texture
 	for(UINT slice=0; slice < descMS.ArraySize; slice++)
@@ -2506,10 +2544,12 @@ void D3D11DebugManager::CopyTex2DMSToArray(ID3D11Texture2D *destArray, ID3D11Tex
 	
 	m_pImmediateContext->CopyResource(srvResource, srcMS);
 	
-	ID3D11UnorderedAccessView *uavs[D3D11_PS_CS_UAV_REGISTER_COUNT] = { NULL };
-	UINT uavCounts[D3D11_PS_CS_UAV_REGISTER_COUNT] = { (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1 };
+	ID3D11UnorderedAccessView *uavs[D3D11_1_UAV_SLOT_COUNT] = { NULL };
+	UINT uavCounts[D3D11_1_UAV_SLOT_COUNT];
+	memset(&uavCounts[0], 0xff, sizeof(uavCounts));
+	const UINT numUAVs = m_WrappedContext->IsFL11_1() ? D3D11_1_UAV_SLOT_COUNT : D3D11_PS_CS_UAV_REGISTER_COUNT;
 
-	m_pImmediateContext->CSSetUnorderedAccessViews(0, D3D11_PS_CS_UAV_REGISTER_COUNT, uavs, uavCounts);
+	m_pImmediateContext->CSSetUnorderedAccessViews(0, numUAVs, uavs, uavCounts);
 	
 	m_pImmediateContext->VSSetShader(m_DebugRender.FullscreenVS, NULL, 0);
 	m_pImmediateContext->PSSetShader(depth ? m_DebugRender.DepthCopyMSToArrayPS : m_DebugRender.CopyMSToArrayPS, NULL, 0);
@@ -2629,7 +2669,7 @@ void D3D11DebugManager::CopyTex2DMSToArray(ID3D11Texture2D *destArray, ID3D11Tex
 
 	srvs[srvIndex] = srvMS;
 	
-	m_pImmediateContext->PSSetShaderResources(0, D3D11_PS_CS_UAV_REGISTER_COUNT, srvs);
+	m_pImmediateContext->PSSetShaderResources(0, 8, srvs);
 
 	// loop over every array slice in MS texture
 	for(UINT slice=0; slice < descMS.ArraySize; slice++)
@@ -3261,6 +3301,8 @@ bool D3D11DebugManager::RenderTexture(TextureDisplay cfg, bool blendAlpha)
 	DebugVertexCBuffer vertexData;
 	DebugPixelCBufferData pixelData;
 
+	pixelData.AlwaysZero = 0.0f;
+
 	float x = cfg.offx;
 	float y = cfg.offy;
 	
@@ -3359,7 +3401,7 @@ bool D3D11DebugManager::RenderTexture(TextureDisplay cfg, bool blendAlpha)
 
 		if(it != WrappedShader::m_ShaderList.end())
 		{
-			auto dxbc = it->second.m_DXBCFile;
+			auto dxbc = it->second->GetDXBC();
 
 			RDCASSERT(dxbc);
 			RDCASSERT(dxbc->m_Type == D3D11_SHVER_PIXEL_SHADER);
@@ -3538,10 +3580,12 @@ bool D3D11DebugManager::RenderTexture(TextureDisplay cfg, bool blendAlpha)
 			m_pImmediateContext->PSSetConstantBuffers(0, 1, &customBuff);
 		}
 		
-		ID3D11UnorderedAccessView *NullUAVs[D3D11_PS_CS_UAV_REGISTER_COUNT] = { 0 };
-		UINT UAV_keepcounts[D3D11_PS_CS_UAV_REGISTER_COUNT] = { (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1, (UINT)-1 };
+		ID3D11UnorderedAccessView *NullUAVs[D3D11_1_UAV_SLOT_COUNT] = { 0 };
+		UINT UAV_keepcounts[D3D11_1_UAV_SLOT_COUNT];
+		memset(&UAV_keepcounts[0], 0xff, sizeof(UAV_keepcounts));
+		const UINT numUAVs = m_WrappedContext->IsFL11_1() ? D3D11_1_UAV_SLOT_COUNT : D3D11_PS_CS_UAV_REGISTER_COUNT;
 
-		m_pImmediateContext->CSSetUnorderedAccessViews(0, D3D11_PS_CS_UAV_REGISTER_COUNT, NullUAVs, UAV_keepcounts);
+		m_pImmediateContext->CSSetUnorderedAccessViews(0, numUAVs, NullUAVs, UAV_keepcounts);
 
 		m_pImmediateContext->PSSetShaderResources(srvOffset, eTexType_Max, details.srv);
 
@@ -3647,6 +3691,8 @@ void D3D11DebugManager::RenderCheckerboard(Vec3f light, Vec3f dark)
 	FillCBuffer(m_DebugRender.GenericVSCBuffer, (float *)&vertexData, sizeof(DebugVertexCBuffer));
 
 	DebugPixelCBufferData pixelData;
+
+	pixelData.AlwaysZero = 0.0f;
 
 	pixelData.Channels = Vec4f(light.x, light.y, light.z, 0.0f);
 	pixelData.WireframeColour = dark;
@@ -3901,7 +3947,7 @@ void D3D11DebugManager::InitPostVSBuffers(uint32_t frameID, uint32_t eventID)
 
 			ID3D11Buffer *origBuf = idxBuf;
 
-			vector<byte> idxdata = GetBufferData(idxBuf, idxOffs + drawcall->indexOffset*bytesize, drawcall->numIndices*bytesize);
+			vector<byte> idxdata = GetBufferData(idxBuf, idxOffs + drawcall->indexOffset*bytesize, drawcall->numIndices*bytesize, true);
 
 			SAFE_RELEASE(idxBuf);
 			
@@ -4444,11 +4490,11 @@ void D3D11DebugManager::InitPostVSBuffers(uint32_t frameID, uint32_t eventID)
 	}
 }
 
-FloatVector D3D11DebugManager::InterpretVertex(byte *data, uint32_t vert, MeshDisplay cfg, byte *end, bool &valid)
+FloatVector D3D11DebugManager::InterpretVertex(byte *data, uint32_t vert, MeshDisplay cfg, byte *end, bool useidx, bool &valid)
 {
 	FloatVector ret(0.0f, 0.0f, 0.0f, 1.0f);
 
-	if(m_HighlightCache.useidx)
+	if(useidx && m_HighlightCache.useidx)
 	{
 		if(vert >= (uint32_t)m_HighlightCache.indices.size())
 		{
@@ -4547,19 +4593,15 @@ void D3D11DebugManager::RenderMesh(uint32_t frameID, uint32_t eventID, const vec
 
 	Matrix4f projMat = Matrix4f::Perspective(90.0f, 0.1f, 100000.0f, float(GetWidth())/float(GetHeight()));
 
-	Camera cam;
-	if(cfg.arcballCamera)
-		cam.Arcball(cfg.cameraPos.x, Vec3f(cfg.cameraRot.x, cfg.cameraRot.y, cfg.cameraRot.z));
-	else
-		cam.fpsLook(Vec3f(cfg.cameraPos.x, cfg.cameraPos.y, cfg.cameraPos.z), Vec3f(cfg.cameraRot.x, cfg.cameraRot.y, cfg.cameraRot.z));
-
-	Matrix4f camMat = cam.GetMatrix();
+	Matrix4f camMat = cfg.cam ? cfg.cam->GetMatrix() : Matrix4f::Identity();
 	Matrix4f guessProjInv;
 
 	vertexData.ModelViewProj = projMat.Mul(camMat);
 	vertexData.SpriteSize = Vec2f();
 
 	DebugPixelCBufferData pixelData;
+
+	pixelData.AlwaysZero = 0.0f;
 
 	pixelData.OutputDisplayFormat = MESHDISPLAY_SOLID;
 	pixelData.WireframeColour = Vec3f(0.0f, 0.0f, 0.0f);
@@ -4956,7 +4998,7 @@ void D3D11DebugManager::RenderMesh(uint32_t frameID, uint32_t eventID, const vec
 			primTopo = D3D11_PRIMITIVE_TOPOLOGY_LINELIST;
 		}
 		
-		activeVertex = InterpretVertex(data, idx, cfg, dataEnd, valid);
+		activeVertex = InterpretVertex(data, idx, cfg, dataEnd, true, valid);
 
 		// see http://msdn.microsoft.com/en-us/library/windows/desktop/bb205124(v=vs.85).aspx for
 		// how primitive topologies are laid out
@@ -4964,26 +5006,26 @@ void D3D11DebugManager::RenderMesh(uint32_t frameID, uint32_t eventID, const vec
 		{
 			uint32_t v = uint32_t(idx/2) * 2; // find first vert in primitive
 
-			activePrim.push_back(InterpretVertex(data, v+0, cfg, dataEnd, valid));
-			activePrim.push_back(InterpretVertex(data, v+1, cfg, dataEnd, valid));
+			activePrim.push_back(InterpretVertex(data, v+0, cfg, dataEnd, true, valid));
+			activePrim.push_back(InterpretVertex(data, v+1, cfg, dataEnd, true, valid));
 		}
 		else if(meshtopo == D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST)
 		{
 			uint32_t v = uint32_t(idx/3) * 3; // find first vert in primitive
 
-			activePrim.push_back(InterpretVertex(data, v+0, cfg, dataEnd, valid));
-			activePrim.push_back(InterpretVertex(data, v+1, cfg, dataEnd, valid));
-			activePrim.push_back(InterpretVertex(data, v+2, cfg, dataEnd, valid));
+			activePrim.push_back(InterpretVertex(data, v+0, cfg, dataEnd, true, valid));
+			activePrim.push_back(InterpretVertex(data, v+1, cfg, dataEnd, true, valid));
+			activePrim.push_back(InterpretVertex(data, v+2, cfg, dataEnd, true, valid));
 		}
 		else if(meshtopo == D3D11_PRIMITIVE_TOPOLOGY_LINELIST_ADJ)
 		{
 			uint32_t v = uint32_t(idx/4) * 4; // find first vert in primitive
 			
 			FloatVector vs[] = {
-				InterpretVertex(data, v+0, cfg, dataEnd, valid),
-				InterpretVertex(data, v+1, cfg, dataEnd, valid),
-				InterpretVertex(data, v+2, cfg, dataEnd, valid),
-				InterpretVertex(data, v+3, cfg, dataEnd, valid),
+				InterpretVertex(data, v+0, cfg, dataEnd, true, valid),
+				InterpretVertex(data, v+1, cfg, dataEnd, true, valid),
+				InterpretVertex(data, v+2, cfg, dataEnd, true, valid),
+				InterpretVertex(data, v+3, cfg, dataEnd, true, valid),
 			};
 
 			adjacentPrimVertices.push_back(vs[0]);
@@ -5000,12 +5042,12 @@ void D3D11DebugManager::RenderMesh(uint32_t frameID, uint32_t eventID, const vec
 			uint32_t v = uint32_t(idx/6) * 6; // find first vert in primitive
 			
 			FloatVector vs[] = {
-				InterpretVertex(data, v+0, cfg, dataEnd, valid),
-				InterpretVertex(data, v+1, cfg, dataEnd, valid),
-				InterpretVertex(data, v+2, cfg, dataEnd, valid),
-				InterpretVertex(data, v+3, cfg, dataEnd, valid),
-				InterpretVertex(data, v+4, cfg, dataEnd, valid),
-				InterpretVertex(data, v+5, cfg, dataEnd, valid),
+				InterpretVertex(data, v+0, cfg, dataEnd, true, valid),
+				InterpretVertex(data, v+1, cfg, dataEnd, true, valid),
+				InterpretVertex(data, v+2, cfg, dataEnd, true, valid),
+				InterpretVertex(data, v+3, cfg, dataEnd, true, valid),
+				InterpretVertex(data, v+4, cfg, dataEnd, true, valid),
+				InterpretVertex(data, v+5, cfg, dataEnd, true, valid),
 			};
 
 			adjacentPrimVertices.push_back(vs[0]);
@@ -5032,8 +5074,8 @@ void D3D11DebugManager::RenderMesh(uint32_t frameID, uint32_t eventID, const vec
 			// primitive, and thereafter each point is in the next primitive
 			uint32_t v = RDCMAX(idx, 1U) - 1;
 			
-			activePrim.push_back(InterpretVertex(data, v+0, cfg, dataEnd, valid));
-			activePrim.push_back(InterpretVertex(data, v+1, cfg, dataEnd, valid));
+			activePrim.push_back(InterpretVertex(data, v+0, cfg, dataEnd, true, valid));
+			activePrim.push_back(InterpretVertex(data, v+1, cfg, dataEnd, true, valid));
 		}
 		else if(meshtopo == D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP)
 		{
@@ -5043,9 +5085,9 @@ void D3D11DebugManager::RenderMesh(uint32_t frameID, uint32_t eventID, const vec
 			// primitive, and thereafter each point is in the next primitive
 			uint32_t v = RDCMAX(idx, 2U) - 2;
 			
-			activePrim.push_back(InterpretVertex(data, v+0, cfg, dataEnd, valid));
-			activePrim.push_back(InterpretVertex(data, v+1, cfg, dataEnd, valid));
-			activePrim.push_back(InterpretVertex(data, v+2, cfg, dataEnd, valid));
+			activePrim.push_back(InterpretVertex(data, v+0, cfg, dataEnd, true, valid));
+			activePrim.push_back(InterpretVertex(data, v+1, cfg, dataEnd, true, valid));
+			activePrim.push_back(InterpretVertex(data, v+2, cfg, dataEnd, true, valid));
 		}
 		else if(meshtopo == D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP_ADJ)
 		{
@@ -5056,10 +5098,10 @@ void D3D11DebugManager::RenderMesh(uint32_t frameID, uint32_t eventID, const vec
 			uint32_t v = RDCMAX(idx, 3U) - 3;
 			
 			FloatVector vs[] = {
-				InterpretVertex(data, v+0, cfg, dataEnd, valid),
-				InterpretVertex(data, v+1, cfg, dataEnd, valid),
-				InterpretVertex(data, v+2, cfg, dataEnd, valid),
-				InterpretVertex(data, v+3, cfg, dataEnd, valid),
+				InterpretVertex(data, v+0, cfg, dataEnd, true, valid),
+				InterpretVertex(data, v+1, cfg, dataEnd, true, valid),
+				InterpretVertex(data, v+2, cfg, dataEnd, true, valid),
+				InterpretVertex(data, v+3, cfg, dataEnd, true, valid),
 			};
 
 			adjacentPrimVertices.push_back(vs[0]);
@@ -5087,18 +5129,18 @@ void D3D11DebugManager::RenderMesh(uint32_t frameID, uint32_t eventID, const vec
 			else if(idx <= 4 || numidx <= 7)
 			{
 				FloatVector vs[] = {
-					InterpretVertex(data, 0, cfg, dataEnd, valid),
-					InterpretVertex(data, 1, cfg, dataEnd, valid),
-					InterpretVertex(data, 2, cfg, dataEnd, valid),
-					InterpretVertex(data, 3, cfg, dataEnd, valid),
-					InterpretVertex(data, 4, cfg, dataEnd, valid),
+					InterpretVertex(data, 0, cfg, dataEnd, true, valid),
+					InterpretVertex(data, 1, cfg, dataEnd, true, valid),
+					InterpretVertex(data, 2, cfg, dataEnd, true, valid),
+					InterpretVertex(data, 3, cfg, dataEnd, true, valid),
+					InterpretVertex(data, 4, cfg, dataEnd, true, valid),
 
 					// note this one isn't used as it's adjacency for the next triangle
-					InterpretVertex(data, 5, cfg, dataEnd, valid),
+					InterpretVertex(data, 5, cfg, dataEnd, true, valid),
 
 					// min() with number of indices in case this is a tiny strip
 					// that is basically just a list
-					InterpretVertex(data, RDCMIN(6U, numidx-1), cfg, dataEnd, valid),
+					InterpretVertex(data, RDCMIN(6U, numidx-1), cfg, dataEnd, true, valid),
 				};
 
 				// these are the triangles on the far left of the MSDN diagram above
@@ -5123,18 +5165,18 @@ void D3D11DebugManager::RenderMesh(uint32_t frameID, uint32_t eventID, const vec
 				// in diagram, numidx == 14
 
 				FloatVector vs[] = {
-					/*[0]=*/ InterpretVertex(data, numidx-8, cfg, dataEnd, valid), // 6 in diagram
+					/*[0]=*/ InterpretVertex(data, numidx-8, cfg, dataEnd, true, valid), // 6 in diagram
 
 					// as above, unused since this is adjacency for 2-previous triangle
-					/*[1]=*/ InterpretVertex(data, numidx-7, cfg, dataEnd, valid), // 7 in diagram
-					/*[2]=*/ InterpretVertex(data, numidx-6, cfg, dataEnd, valid), // 8 in diagram
+					/*[1]=*/ InterpretVertex(data, numidx-7, cfg, dataEnd, true, valid), // 7 in diagram
+					/*[2]=*/ InterpretVertex(data, numidx-6, cfg, dataEnd, true, valid), // 8 in diagram
 					
 					// as above, unused since this is adjacency for previous triangle
-					/*[3]=*/ InterpretVertex(data, numidx-5, cfg, dataEnd, valid), // 9 in diagram
-					/*[4]=*/ InterpretVertex(data, numidx-4, cfg, dataEnd, valid), // 10 in diagram
-					/*[5]=*/ InterpretVertex(data, numidx-3, cfg, dataEnd, valid), // 11 in diagram
-					/*[6]=*/ InterpretVertex(data, numidx-2, cfg, dataEnd, valid), // 12 in diagram
-					/*[7]=*/ InterpretVertex(data, numidx-1, cfg, dataEnd, valid), // 13 in diagram
+					/*[3]=*/ InterpretVertex(data, numidx-5, cfg, dataEnd, true, valid), // 9 in diagram
+					/*[4]=*/ InterpretVertex(data, numidx-4, cfg, dataEnd, true, valid), // 10 in diagram
+					/*[5]=*/ InterpretVertex(data, numidx-3, cfg, dataEnd, true, valid), // 11 in diagram
+					/*[6]=*/ InterpretVertex(data, numidx-2, cfg, dataEnd, true, valid), // 12 in diagram
+					/*[7]=*/ InterpretVertex(data, numidx-1, cfg, dataEnd, true, valid), // 13 in diagram
 				};
 
 				// these are the triangles on the far right of the MSDN diagram above
@@ -5164,19 +5206,19 @@ void D3D11DebugManager::RenderMesh(uint32_t frameID, uint32_t eventID, const vec
 				// these correspond to the indices in the MSDN diagram, with {2,4,6} as the
 				// main triangle
 				FloatVector vs[] = {
-					InterpretVertex(data, v+0, cfg, dataEnd, valid),
+					InterpretVertex(data, v+0, cfg, dataEnd, true, valid),
 
 					// this one is adjacency for 2-previous triangle
-					InterpretVertex(data, v+1, cfg, dataEnd, valid),
-					InterpretVertex(data, v+2, cfg, dataEnd, valid),
+					InterpretVertex(data, v+1, cfg, dataEnd, true, valid),
+					InterpretVertex(data, v+2, cfg, dataEnd, true, valid),
 
 					// this one is adjacency for previous triangle
-					InterpretVertex(data, v+3, cfg, dataEnd, valid),
-					InterpretVertex(data, v+4, cfg, dataEnd, valid),
-					InterpretVertex(data, v+5, cfg, dataEnd, valid),
-					InterpretVertex(data, v+6, cfg, dataEnd, valid),
-					InterpretVertex(data, v+7, cfg, dataEnd, valid),
-					InterpretVertex(data, v+8, cfg, dataEnd, valid),
+					InterpretVertex(data, v+3, cfg, dataEnd, true, valid),
+					InterpretVertex(data, v+4, cfg, dataEnd, true, valid),
+					InterpretVertex(data, v+5, cfg, dataEnd, true, valid),
+					InterpretVertex(data, v+6, cfg, dataEnd, true, valid),
+					InterpretVertex(data, v+7, cfg, dataEnd, true, valid),
+					InterpretVertex(data, v+8, cfg, dataEnd, true, valid),
 				};
 
 				// these are the triangles around {2,4,6} in the MSDN diagram above
@@ -5206,7 +5248,7 @@ void D3D11DebugManager::RenderMesh(uint32_t frameID, uint32_t eventID, const vec
 			for(uint32_t v = v0; v < v0+dim; v++)
 			{
 				if(v != idx && valid)
-					inactiveVertices.push_back(InterpretVertex(data, v, cfg, dataEnd, valid));
+					inactiveVertices.push_back(InterpretVertex(data, v, cfg, dataEnd, true, valid));
 			}
 		}
 		else // if(meshtopo == D3D11_PRIMITIVE_TOPOLOGY_POINTLIST) point list, or unknown/unhandled type
@@ -5344,6 +5386,70 @@ void D3D11DebugManager::RenderMesh(uint32_t frameID, uint32_t eventID, const vec
 
 		if(cfg.position.unproject)
 			m_pImmediateContext->VSSetShader(m_DebugRender.WireframeVS, NULL, 0);
+	}
+
+	// bounding box
+	if(cfg.showBBox)
+	{
+		UINT strides[] = { sizeof(Vec4f) };
+		UINT offsets[] = { 0 };
+		D3D11_MAPPED_SUBRESOURCE mapped;
+
+		vertexData.SpriteSize = Vec2f();
+		vertexData.ModelViewProj = projMat.Mul(camMat);
+		FillCBuffer(m_DebugRender.GenericVSCBuffer, (float *)&vertexData, sizeof(DebugVertexCBuffer));
+		
+		HRESULT hr = m_pImmediateContext->Map(m_TriHighlightHelper, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+		
+		Vec4f a = Vec4f(cfg.minBounds.x, cfg.minBounds.y, cfg.minBounds.z, cfg.minBounds.w);
+		Vec4f b = Vec4f(cfg.maxBounds.x, cfg.maxBounds.y, cfg.maxBounds.z, cfg.maxBounds.w);
+
+		Vec4f TLN = Vec4f(a.x, b.y, a.z, 1.0f); // TopLeftNear, etc...
+		Vec4f TRN = Vec4f(b.x, b.y, a.z, 1.0f);
+		Vec4f BLN = Vec4f(a.x, a.y, a.z, 1.0f);
+		Vec4f BRN = Vec4f(b.x, a.y, a.z, 1.0f);
+
+		Vec4f TLF = Vec4f(a.x, b.y, b.z, 1.0f);
+		Vec4f TRF = Vec4f(b.x, b.y, b.z, 1.0f);
+		Vec4f BLF = Vec4f(a.x, a.y, b.z, 1.0f);
+		Vec4f BRF = Vec4f(b.x, a.y, b.z, 1.0f);
+
+		// 12 frustum lines => 24 verts
+		Vec4f bbox[24] =
+		{
+			TLN, TRN,
+			TRN, BRN,
+			BRN, BLN,
+			BLN, TLN,
+
+			TLN, TLF,
+			TRN, TRF,
+			BLN, BLF,
+			BRN, BRF,
+
+			TLF, TRF,
+			TRF, BRF,
+			BRF, BLF,
+			BLF, TLF,
+		};
+
+		memcpy(mapped.pData, bbox, sizeof(bbox));
+		
+		m_pImmediateContext->Unmap(m_TriHighlightHelper, 0);
+		
+		// we want this to clip
+		m_pImmediateContext->OMSetDepthStencilState(m_DebugRender.LEqualDepthState, 0);
+
+		m_pImmediateContext->IASetVertexBuffers(0, 1, &m_TriHighlightHelper, (UINT *)&strides, (UINT *)&offsets);
+		m_pImmediateContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
+		m_pImmediateContext->IASetInputLayout(m_DebugRender.GenericLayout);
+
+		pixelData.WireframeColour = Vec3f(0.2f, 0.2f, 1.0f);
+		FillCBuffer(m_DebugRender.GenericPSCBuffer, (float *)&pixelData, sizeof(DebugPixelCBufferData));
+
+		m_pImmediateContext->Draw(24, 0);
+
+		m_pImmediateContext->OMSetDepthStencilState(m_DebugRender.NoDepthState, 0);
 	}
 
 	// 'fake' helper frustum
